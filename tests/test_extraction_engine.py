@@ -25,7 +25,7 @@ def test_assigns_data_types():
     fields = {field.name: field.data_type for field in plan.fields}
 
     assert fields["salary"] == "number"
-    assert fields["date"] == "date"
+    assert fields["posted_date"] == "date"
 
 
 def test_supports_common_field_aliases():

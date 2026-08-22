@@ -42,7 +42,8 @@ _FIELD_ALIASES = {
     "url": ("url", "link", "website"),
     "email": ("email", "email address"),
     "phone": ("phone", "phone number", "telephone"),
-    "date": ("date", "posted date", "publication date"),
+    "posted_date": ("posted date", "publication date", "published date"),
+    "date": ("date",),
 }
 
 
@@ -66,7 +67,7 @@ def _field_from_phrase(phrase: str) -> ExtractionField:
 
             if canonical_name == "salary":
                 data_type = "number"
-            elif canonical_name == "date":
+            elif canonical_name in ("date", "posted_date"):
                 data_type = "date"
 
             return ExtractionField(
