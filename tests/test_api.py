@@ -3,10 +3,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 
 
-client = TestClient(
-    app,
-    raise_server_exceptions=False,
-)
+client = TestClient(app, raise_server_exceptions=False)
 
 
 def test_health_endpoint():
@@ -57,9 +54,9 @@ def test_analyze_accepts_valid_request(monkeypatch):
         lists_count = 0
         tables_count = 0
 
-def fake_analyze(url):
-    assert url == "https://example.com/"
-    return FakeAnalysis()
+    def fake_analyze(url):
+        assert url == "https://example.com/"
+        return FakeAnalysis()
 
     monkeypatch.setattr(
         "backend.app.main.analyze_website",
@@ -82,3 +79,46 @@ def fake_analyze(url):
     assert data["title"] == "Example Domain"
     assert data["instruction"] == "Extract the page title"
     assert data["links_count"] == 1
+
+def test_extract_returns_structured_records(monkeypatch):
+    class FakeFetchResult:
+        url = "https://example.com"
+        final_url = "https://example.com/"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <body>
+                <article>
+                    <h2>Example Job</h2>
+                    <div class="company">Example Company</div>
+                    <div class="location">Lagos</div>
+                </article>
+            </body>
+        </html>
+        """
+
+    def fake_fetch(url):
+        assert url == "https://example.com/"
+        return FakeFetchResult()
+
+    monkeypatch.setattr(
+        "backend.app.main.fetch_url",
+        fake_fetch,
+    )
+
+    response = client.post(
+        "/api/extract",
+        json={
+            "url": "https://example.com",
+            "instruction": "Extract title, company and location",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["status"] == "success"
+    assert "records" in data
+    assert len(data["records"]) == 1    

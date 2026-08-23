@@ -6,7 +6,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from app.services.extraction_engine import ExtractionPlan
+from backend.app.services.extraction_engine import ExtractionPlan
 
 
 @dataclass
