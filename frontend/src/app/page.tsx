@@ -5,8 +5,17 @@ import { FormEvent, useState } from "react";
 type AnalysisResult = {
   status: string;
   url: string;
+  final_url: string;
+  status_code: number;
+  content_type: string;
+  title: string;
+  headings: string[];
+  paragraphs_count: number;
+  links_count: number;
+  images_count: number;
+  lists_count: number;
+  tables_count: number;
   instruction: string;
-  message: string;
 };
 
 export default function Home() {
@@ -38,7 +47,12 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.detail?.[0]?.msg || "Analysis failed.");
+        const detail =
+          typeof data.detail === "string"
+            ? data.detail
+            : data.detail?.[0]?.msg;
+
+        throw new Error(detail || "Website analysis failed.");
       }
 
       setResult(data);
@@ -131,26 +145,121 @@ export default function Home() {
           {result && (
             <div className="mt-8 rounded-lg border border-emerald-800 bg-emerald-950/30 p-6">
               <h3 className="text-lg font-semibold text-emerald-300">
-                Analysis request received
+                Website Analysis Complete
               </h3>
 
-              <div className="mt-4 space-y-2 text-sm text-slate-300">
+              <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Page title
+                  </p>
+                  <p className="mt-2 font-medium text-white">
+                    {result.title || "No title found"}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    HTTP status
+                  </p>
+                  <p className="mt-2 font-medium text-white">
+                    {result.status_code}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Content type
+                  </p>
+                  <p className="mt-2 font-medium text-white">
+                    {result.content_type}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Headings
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-white">
+                    {result.headings.length}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Paragraphs
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-white">
+                    {result.paragraphs_count}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Links
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-white">
+                    {result.links_count}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Images
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-white">
+                    {result.images_count}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Lists
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-white">
+                    {result.lists_count}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-slate-950 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    Tables
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-white">
+                    {result.tables_count}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3 text-sm text-slate-300">
                 <p>
-                  <strong>URL:</strong> {result.url}
+                  <strong>Requested:</strong> {result.instruction}
                 </p>
 
                 <p>
-                  <strong>Instruction:</strong> {result.instruction}
+                  <strong>Final URL:</strong> {result.final_url}
                 </p>
 
                 <p>
-                  <strong>Status:</strong> {result.status}
-                </p>
-
-                <p>
-                  <strong>Message:</strong> {result.message}
+                  <strong>Analysis status:</strong> {result.status}
                 </p>
               </div>
+
+              {result.headings.length > 0 && (
+                <div className="mt-6">
+                  <h4 className="font-semibold text-white">
+                    Detected headings
+                  </h4>
+
+                  <ul className="mt-3 space-y-2 text-sm text-slate-400">
+                    {result.headings.map((heading, index) => (
+                      <li key={`${heading}-${index}`} className="rounded bg-slate-950 px-4 py-2">
+                        {heading}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </section>
