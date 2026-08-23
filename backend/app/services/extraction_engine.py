@@ -27,26 +27,81 @@ class ExtractionPlan:
 
 
 _FIELD_ALIASES = {
+    # General website fields
     "title": (
         "title",
+        "page title",
+        "website title",
         "job title",
         "position",
         "role",
     ),
+    "headings": (
+        "heading",
+        "headings",
+        "page heading",
+        "page headings",
+        "website heading",
+        "website headings",
+    ),
+    "paragraphs": (
+        "paragraph",
+        "paragraphs",
+        "page paragraphs",
+        "website paragraphs",
+        "text",
+        "page text",
+    ),
+    "links": (
+        "link",
+        "links",
+        "page links",
+        "website links",
+    ),
+    "images": (
+        "image",
+        "images",
+        "page images",
+        "website images",
+        "pictures",
+        "photos",
+    ),
+
+    # Geographic fields
+    "latitude": (
+        "latitude",
+        "lat",
+    ),
+    "longitude": (
+        "longitude",
+        "longitude coordinate",
+        "lng",
+        "lon",
+    ),
+    "coordinates": (
+        "coordinate",
+        "coordinates",
+        "geo coordinate",
+        "geo coordinates",
+        "geocoordinate",
+        "geocoordinates",
+        "gps coordinates",
+        "gps location",
+    ),
+
+    # Common structured data fields
     "company": (
         "company",
         "company name",
         "employer",
         "organization",
         "organisation",
-        "organization name",
-        "organisation name",
     ),
     "location": (
         "location",
-        "job location",
         "city",
         "address",
+        "physical address",
     ),
     "salary": (
         "salary",
@@ -68,7 +123,8 @@ _FIELD_ALIASES = {
     ),
     "url": (
         "url",
-        "link",
+        "link url",
+        "website url",
         "website",
     ),
     "email": (
@@ -79,6 +135,7 @@ _FIELD_ALIASES = {
         "phone",
         "phone number",
         "telephone",
+        "telephone number",
     ),
     "posted_date": (
         "posted date",
@@ -93,18 +150,11 @@ _FIELD_ALIASES = {
 
 
 def _normalize_instruction(instruction: str) -> str:
-    """Normalize whitespace in the user's instruction."""
     return re.sub(r"\s+", " ", instruction).strip()
 
 
 def _field_from_phrase(phrase: str) -> ExtractionField:
-    """
-    Convert a natural-language field phrase into an extraction field.
-    """
-
-    original_phrase = phrase.strip()
-
-    normalized = original_phrase.lower().strip()
+    normalized = phrase.lower().strip()
 
     # Remove common articles.
     normalized = re.sub(
@@ -113,10 +163,6 @@ def _field_from_phrase(phrase: str) -> ExtractionField:
         normalized,
     )
 
-    # Normalize internal whitespace.
-    normalized = re.sub(r"\s+", " ", normalized)
-
-    # Check known aliases.
     for canonical_name, aliases in _FIELD_ALIASES.items():
         if normalized in aliases:
             data_type = "string"
@@ -124,88 +170,57 @@ def _field_from_phrase(phrase: str) -> ExtractionField:
             if canonical_name == "salary":
                 data_type = "number"
 
-            elif canonical_name in {
+            elif canonical_name in (
                 "date",
                 "posted_date",
-            }:
+            ):
                 data_type = "date"
+
+            elif canonical_name in (
+                "latitude",
+                "longitude",
+            ):
+                data_type = "number"
+
+            elif canonical_name == "coordinates":
+                data_type = "coordinates"
 
             return ExtractionField(
                 name=canonical_name,
-                description=original_phrase,
+                description=phrase.strip(),
                 data_type=data_type,
             )
 
-    # Fall back to a safe field name for custom fields.
+    # Support unknown/custom fields.
     safe_name = re.sub(
         r"[^a-z0-9]+",
         "_",
         normalized,
     ).strip("_")
 
-    if not safe_name:
-        safe_name = "field"
-
     return ExtractionField(
-        name=safe_name,
-        description=original_phrase,
-        data_type="string",
+        name=safe_name or "field",
+        description=phrase.strip(),
     )
-
-
-def _split_field_phrases(text: str) -> list[str]:
-    """
-    Split a natural-language list of requested fields.
-
-    Supports examples such as:
-
-        title, company, location
-
-        title and company and location
-
-        title, company and location
-
-        title; company; location
-    """
-
-    # Normalize semicolons to commas.
-    text = re.sub(r"\s*;\s*", ",", text)
-
-    # Convert common conjunctions to commas.
-    text = re.sub(
-        r"\s+(?:and|&)\s+",
-        ",",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    phrases = []
-
-    for phrase in text.split(","):
-        cleaned = phrase.strip(" .;:")
-
-        if cleaned:
-            phrases.append(cleaned)
-
-    return phrases
 
 
 def build_extraction_plan(instruction: str) -> ExtractionPlan:
     """
-    Convert a natural-language extraction instruction into a
-    deterministic extraction plan.
+    Convert a natural-language extraction instruction
+    into a deterministic extraction plan.
 
     Examples:
 
-        Extract job title, company and location
+        Extract the page title and headings
 
-        Extract the title and headings
+        Extract company, location and salary
 
-        Get company name, salary and application URL
+        Extract latitude, longitude and address
 
-        Extract title, description and posted date
+        Extract coordinates and website URL
 
-    The planner intentionally does not require an external AI service.
+    The planner intentionally avoids an external LLM
+    dependency for this first implementation.
     """
 
     normalized = _normalize_instruction(instruction)
@@ -215,23 +230,19 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
             "Extraction instruction cannot be empty."
         )
 
-    cleaned = normalized
-
     # Remove common introductory phrases.
     cleaned = re.sub(
         r"^(please\s+)?"
-        r"(extract|get|find|collect|retrieve|"
-        r"scrape|return|show)\s+",
+        r"(extract|get|find|collect|retrieve)\s+",
         "",
-        cleaned,
+        normalized,
         flags=re.IGNORECASE,
     )
 
     # Remove phrases such as:
-    #
-    # "the following information"
-    # "the following data"
-    # "the following fields"
+    # "the following information:"
+    # "the following data:"
+    # "these fields:"
     cleaned = re.sub(
         r"^(the\s+)?"
         r"(following\s+)?"
@@ -242,26 +253,22 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
         flags=re.IGNORECASE,
     )
 
-    # Remove a leading "from every..." clause only when it
-    # introduces the website/listing context rather than fields.
+    # Convert conjunctions to separators.
     cleaned = re.sub(
-        r"^(from|for)\s+"
-        r"(every|each|all)\s+"
-        r"(listing|listings|record|records|item|items|"
-        r"result|results)\s*[:,]?\s*",
-        "",
+        r"\s+and\s+",
+        ",",
         cleaned,
         flags=re.IGNORECASE,
     )
 
-    phrases = _split_field_phrases(cleaned)
-
-    if not phrases:
-        raise ValueError(
-            "Could not identify extraction fields."
-        )
+    phrases = [
+        phrase.strip(" .;:")
+        for phrase in re.split(r",|;", cleaned)
+        if phrase.strip(" .;:")
+    ]
 
     fields: list[ExtractionField] = []
+    seen: set[str] = set()
 
     for phrase in phrases:
         field = _field_from_phrase(phrase)
@@ -269,6 +276,11 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
         if not field.name:
             continue
 
+        # Prevent duplicate fields.
+        if field.name in seen:
+            continue
+
+        seen.add(field.name)
         fields.append(field)
 
     if not fields:
@@ -276,18 +288,7 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
             "Could not identify extraction fields."
         )
 
-    # Remove duplicate fields while preserving order.
-    unique_fields: list[ExtractionField] = []
-    seen_names: set[str] = set()
-
-    for field in fields:
-        if field.name in seen_names:
-            continue
-
-        seen_names.add(field.name)
-        unique_fields.append(field)
-
     return ExtractionPlan(
         instruction=normalized,
-        fields=unique_fields,
+        fields=fields,
     )
