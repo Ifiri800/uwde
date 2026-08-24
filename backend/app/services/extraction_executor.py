@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -8,7 +8,6 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-
 from backend.app.services.extraction_engine import ExtractionPlan
 
 
@@ -17,18 +16,20 @@ class ExtractionResult:
     records: list[dict[str, Any]]
 
     def model_dump(self) -> dict[str, Any]:
-        return {"records": self.records}
+        return {
+            "records": self.records,
+        }
 
 
 # ---------------------------------------------------------------------------
-# Basic utilities
+# General helpers
 # ---------------------------------------------------------------------------
 
 def _clean_text(value: str | None) -> str:
     if not value:
         return ""
 
-    return " ".join(value.split())
+    return " ".join(str(value).split())
 
 
 def _unique(values: list[str]) -> list[str]:
@@ -41,32 +42,49 @@ def _unique(values: list[str]) -> list[str]:
         if not cleaned:
             continue
 
-        key = cleaned.lower()
-
-        if key in seen:
+        if cleaned in seen:
             continue
 
-        seen.add(key)
+        seen.add(cleaned)
         result.append(cleaned)
 
     return result
 
 
-def _first_text(element, selectors: list[str]) -> str:
-    for selector in selectors:
-        match = element.select_one(selector)
+# ---------------------------------------------------------------------------
+# Meta extraction
+# ---------------------------------------------------------------------------
 
-        if not match:
-            continue
+def _extract_meta_content(
+    soup: BeautifulSoup,
+    names: list[str],
+) -> list[str]:
+    wanted = {
+        name.lower()
+        for name in names
+    }
 
-        text = _clean_text(
-            match.get_text(" ", strip=True)
+    values: list[str] = []
+
+    for tag in soup.find_all("meta"):
+        name = (
+            tag.get("name")
+            or tag.get("property")
+            or tag.get("itemprop")
         )
 
-        if text:
-            return text
+        if not name:
+            continue
 
-    return ""
+        if str(name).lower() not in wanted:
+            continue
+
+        content = tag.get("content")
+
+        if content:
+            values.append(str(content))
+
+    return _unique(values)
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +107,10 @@ def _extract_json_ld(
 
         try:
             data = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
             continue
 
         if isinstance(data, dict):
@@ -103,8 +124,49 @@ def _extract_json_ld(
     return documents
 
 
+def _flatten_json_values(
+    value: Any,
+    key_names: set[str],
+) -> list[str]:
+    values: list[str] = []
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized_key = (
+                str(key)
+                .lower()
+                .replace("-", "")
+                .replace("_", "")
+            )
+
+            if normalized_key in key_names:
+                if isinstance(
+                    child,
+                    (str, int, float),
+                ):
+                    values.append(str(child))
+
+            values.extend(
+                _flatten_json_values(
+                    child,
+                    key_names,
+                )
+            )
+
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(
+                _flatten_json_values(
+                    item,
+                    key_names,
+                )
+            )
+
+    return values
+
+
 # ---------------------------------------------------------------------------
-# Coordinates
+# Coordinate extraction
 # ---------------------------------------------------------------------------
 
 def _extract_coordinates_from_text(
@@ -112,11 +174,9 @@ def _extract_coordinates_from_text(
 ) -> tuple[str, str]:
     pattern = re.compile(
         r"(?<![\d.-])"
-        r"(-?(?:90(?:\.0+)?|"
-        r"[0-8]?\d(?:\.\d+)?))"
+        r"(-?(?:90(?:\.0+)?|[0-8]?\d(?:\.\d+)?))"
         r"\s*[,;]\s*"
-        r"(-?(?:180(?:\.0+)?|"
-        r"(?:1[0-7]\d|[1-9]?\d)(?:\.\d+)?))"
+        r"(-?(?:180(?:\.0+)?|(?:1[0-7]\d|[1-9]?\d)(?:\.\d+)?))"
         r"(?![\d.-])"
     )
 
@@ -125,108 +185,57 @@ def _extract_coordinates_from_text(
     if not match:
         return "", ""
 
-    return match.group(1), match.group(2)
+    return (
+        match.group(1),
+        match.group(2),
+    )
 
 
 def _extract_coordinate_fields(
     soup: BeautifulSoup,
 ) -> tuple[str, str, str]:
-
     latitude = ""
     longitude = ""
 
-    # JSON-LD / Schema.org
     for document in _extract_json_ld(soup):
+        lat_names = {
+            "latitude",
+            "lat",
+        }
 
-        geo = document.get("geo")
+        lon_names = {
+            "longitude",
+            "lon",
+            "lng",
+        }
 
-        candidates = [document]
-
-        if isinstance(geo, dict):
-            candidates.append(geo)
-
-        for candidate in candidates:
-
-            lat = candidate.get("latitude")
-            lon = candidate.get("longitude")
-
-            if lat is not None and not latitude:
-                latitude = str(lat)
-
-            if lon is not None and not longitude:
-                longitude = str(lon)
-
-    # Meta tags
-    if not latitude:
-        for selector in [
-            "meta[name='latitude']",
-            "meta[property='latitude']",
-            "meta[name='geo.position']",
-            "meta[property='place:location:latitude']",
-        ]:
-            element = soup.select_one(selector)
-
-            if element and element.get("content"):
-                latitude = str(element.get("content")).split(";")[0]
-                break
-
-    if not longitude:
-        for selector in [
-            "meta[name='longitude']",
-            "meta[property='longitude']",
-            "meta[name='geo.position']",
-            "meta[property='place:location:longitude']",
-        ]:
-            element = soup.select_one(selector)
-
-            if element and element.get("content"):
-                content = str(element.get("content"))
-
-                if ";" in content:
-                    parts = content.split(";")
-
-                    if len(parts) > 1:
-                        longitude = parts[1]
-
-                else:
-                    longitude = content
-
-                break
-
-    # HTML data attributes
-    if not latitude:
-        element = soup.select_one(
-            "[data-latitude], [data-lat]"
+        lat_values = _flatten_json_values(
+            document,
+            lat_names,
         )
 
-        if element:
-            latitude = str(
-                element.get("data-latitude")
-                or element.get("data-lat")
-                or ""
-            )
-
-    if not longitude:
-        element = soup.select_one(
-            "[data-longitude], [data-lng], [data-lon]"
+        lon_values = _flatten_json_values(
+            document,
+            lon_names,
         )
 
-        if element:
-            longitude = str(
-                element.get("data-longitude")
-                or element.get("data-lng")
-                or element.get("data-lon")
-                or ""
-            )
+        if lat_values and not latitude:
+            latitude = lat_values[0]
 
-    # Page text
-    if not latitude or not longitude:
-        text = soup.get_text(
+        if lon_values and not longitude:
+            longitude = lon_values[0]
+
+    text = _clean_text(
+        soup.get_text(
             " ",
             strip=True,
         )
+    )
 
-        text_lat, text_lon = _extract_coordinates_from_text(text)
+    if not latitude or not longitude:
+        text_lat, text_lon = (
+            _extract_coordinates_from_text(text)
+        )
 
         if not latitude:
             latitude = text_lat
@@ -237,17 +246,19 @@ def _extract_coordinate_fields(
     coordinates = ""
 
     if latitude and longitude:
-        coordinates = f"{latitude}, {longitude}"
+        coordinates = (
+            f"{latitude}, {longitude}"
+        )
 
     return (
-        _clean_text(latitude),
-        _clean_text(longitude),
-        _clean_text(coordinates),
+        latitude,
+        longitude,
+        coordinates,
     )
 
 
 # ---------------------------------------------------------------------------
-# General page fields
+# General page extraction
 # ---------------------------------------------------------------------------
 
 def _extract_general_field(
@@ -257,10 +268,24 @@ def _extract_general_field(
 ) -> str:
 
     if field_name == "title":
+        title = soup.title
 
-        if soup.title:
+        if title:
+            value = _clean_text(
+                title.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if value:
+                return value
+
+        heading = soup.find("h1")
+
+        if heading:
             return _clean_text(
-                soup.title.get_text(
+                heading.get_text(
                     " ",
                     strip=True,
                 )
@@ -269,62 +294,71 @@ def _extract_general_field(
         return ""
 
     if field_name == "headings":
-
-        values = []
-
-        for heading in soup.find_all(
-            ["h1", "h2", "h3", "h4", "h5", "h6"]
-        ):
-            values.append(
-                _clean_text(
-                    heading.get_text(
-                        " ",
-                        strip=True,
-                    )
+        values = [
+            _clean_text(
+                heading.get_text(
+                    " ",
+                    strip=True,
                 )
             )
+            for heading in soup.find_all(
+                [
+                    "h1",
+                    "h2",
+                    "h3",
+                    "h4",
+                    "h5",
+                    "h6",
+                ]
+            )
+        ]
 
-        return " | ".join(_unique(values))
+        return " | ".join(
+            _unique(values)
+        )
 
     if field_name == "paragraphs":
-
-        values = []
-
-        for paragraph in soup.find_all("p"):
-            values.append(
-                _clean_text(
-                    paragraph.get_text(
-                        " ",
-                        strip=True,
-                    )
+        values = [
+            _clean_text(
+                paragraph.get_text(
+                    " ",
+                    strip=True,
                 )
             )
+            for paragraph in soup.find_all(
+                "p"
+            )
+        ]
 
-        return " | ".join(_unique(values))
+        return " | ".join(
+            _unique(values)
+        )
 
     if field_name == "links":
-
-        values = []
+        links: list[str] = []
 
         for link in soup.find_all(
             "a",
             href=True,
         ):
-            values.append(
-                urljoin(
-                    base_url,
-                    str(link.get("href")),
-                )
-            )
+            href = link.get("href")
 
-        return " | ".join(_unique(values))
+            if href:
+                links.append(
+                    urljoin(
+                        base_url,
+                        str(href),
+                    )
+                )
+
+        return " | ".join(
+            _unique(links)
+        )
 
     if field_name == "images":
-
-        values = []
+        images: list[str] = []
 
         for image in soup.find_all("img"):
-
             source = (
                 image.get("src")
                 or image.get("data-src")
@@ -332,157 +366,729 @@ def _extract_general_field(
             )
 
             if source:
-                values.append(
+                images.append(
                     urljoin(
                         base_url,
                         str(source),
                     )
                 )
 
-        return " | ".join(_unique(values))
+        return " | ".join(
+            _unique(images)
+        )
 
     return ""
 
 
 # ---------------------------------------------------------------------------
-# Field extraction
+# Environmental / GHG selectors
 # ---------------------------------------------------------------------------
 
-FIELD_SELECTORS: dict[str, list[str]] = {
-
-    "title": [
-        # Common job-title selectors
-        ".job-title",
-        ".job_title",
-        ".jobtitle",
-        ".position-title",
-        ".position_title",
-        ".role-title",
-        ".role_title",
-        "[data-testid='job-title']",
-        "[data-testid='job_title']",
-        "[data-job-title]",
-
-        # Semantic headings inside a record
-        "h2.job-title",
-        "h3.job-title",
-        "h2",
-        "h3",
-
-        # Generic title classes last
-        ".title",
+_FIELD_SELECTORS: dict[str, list[str]] = {
+    "facility": [
+        "[data-facility]",
+        "[data-facility-name]",
+        ".facility",
+        ".facility-name",
+        ".site-name",
+        ".plant-name",
+        "[itemprop='name']",
+    ],
+    "facility_id": [
+        "[data-facility-id]",
+        ".facility-id",
+        ".site-id",
+        ".plant-id",
+    ],
+    "facility_type": [
+        "[data-facility-type]",
+        ".facility-type",
+        ".site-type",
+        ".plant-type",
+    ],
+    "operator": [
+        "[data-operator]",
+        ".operator",
+        ".facility-operator",
+        ".site-operator",
+    ],
+    "owner": [
+        "[data-owner]",
+        ".owner",
+        ".facility-owner",
+        ".site-owner",
+    ],
+    "location": [
+        "[data-location]",
+        ".location",
+        ".address",
+        ".facility-location",
+        ".site-location",
+        "[itemprop='address']",
     ],
 
+    # Methane
+    "methane": [
+        "[data-methane]",
+        ".methane",
+        ".ch4",
+    ],
+    "methane_concentration": [
+        "[data-methane-concentration]",
+        "[data-ch4-concentration]",
+        ".methane-concentration",
+        ".ch4-concentration",
+        ".methane-ppm",
+        ".ch4-ppm",
+    ],
+    "methane_emissions": [
+        "[data-methane-emissions]",
+        "[data-ch4-emissions]",
+        ".methane-emissions",
+        ".ch4-emissions",
+    ],
+    "methane_leak_rate": [
+        "[data-methane-leak-rate]",
+        ".methane-leak-rate",
+        ".ch4-leak-rate",
+    ],
+    "methane_flow_rate": [
+        "[data-methane-flow-rate]",
+        ".methane-flow-rate",
+        ".ch4-flow-rate",
+    ],
+
+    # GHG
+    "ghg": [
+        "[data-ghg]",
+        ".ghg",
+        ".greenhouse-gas",
+    ],
+    "co2": [
+        "[data-co2]",
+        ".co2",
+        ".carbon-dioxide",
+    ],
+    "co2e": [
+        "[data-co2e]",
+        ".co2e",
+        ".co2-equivalent",
+    ],
+    "nitrous_oxide": [
+        "[data-n2o]",
+        "[data-nitrous-oxide]",
+        ".n2o",
+        ".nitrous-oxide",
+    ],
+    "emissions": [
+        "[data-emissions]",
+        ".emissions",
+        ".emission",
+        ".total-emissions",
+    ],
+    "emission_quantity": [
+        "[data-emission-quantity]",
+        ".emission-quantity",
+        ".emissions-quantity",
+    ],
+    "emission_unit": [
+        "[data-emission-unit]",
+        ".emission-unit",
+    ],
+    "emission_source": [
+        "[data-emission-source]",
+        ".emission-source",
+        ".source",
+    ],
+    "emission_category": [
+        "[data-emission-category]",
+        ".emission-category",
+        ".source-category",
+    ],
+
+    # Activity
+    "activity_data": [
+        "[data-activity-data]",
+        ".activity-data",
+        ".activity",
+    ],
+    "activity_type": [
+        "[data-activity-type]",
+        ".activity-type",
+    ],
+    "activity_quantity": [
+        "[data-activity-quantity]",
+        ".activity-quantity",
+        ".activity-value",
+    ],
+    "activity_unit": [
+        "[data-activity-unit]",
+        ".activity-unit",
+    ],
+    "fuel_consumption": [
+        "[data-fuel-consumption]",
+        ".fuel-consumption",
+        ".fuel-use",
+    ],
+    "energy_consumption": [
+        "[data-energy-consumption]",
+        ".energy-consumption",
+        ".energy-use",
+    ],
+    "electricity_consumption": [
+        "[data-electricity-consumption]",
+        ".electricity-consumption",
+        ".electricity-use",
+    ],
+    "gas_consumption": [
+        "[data-gas-consumption]",
+        ".gas-consumption",
+        ".natural-gas-consumption",
+    ],
+
+    # Emission factors
+    "emission_factor": [
+        "[data-emission-factor]",
+        ".emission-factor",
+        ".emission-factors",
+    ],
+    "emission_factor_value": [
+        "[data-emission-factor-value]",
+        ".emission-factor-value",
+        ".factor-value",
+    ],
+    "emission_factor_unit": [
+        "[data-emission-factor-unit]",
+        ".emission-factor-unit",
+        ".factor-unit",
+    ],
+    "emission_factor_source": [
+        "[data-emission-factor-source]",
+        ".emission-factor-source",
+        ".factor-source",
+    ],
+
+    # Inventory
+    "inventory": [
+        "[data-inventory]",
+        ".inventory",
+        ".ghg-inventory",
+        ".emissions-inventory",
+    ],
+    "inventory_year": [
+        "[data-inventory-year]",
+        ".inventory-year",
+        ".reporting-year",
+        ".base-year",
+    ],
+    "inventory_period": [
+        "[data-inventory-period]",
+        ".inventory-period",
+        ".reporting-period",
+    ],
+    "inventory_total": [
+        "[data-inventory-total]",
+        ".inventory-total",
+        ".total-inventory",
+    ],
+    "reporting_entity": [
+        "[data-reporting-entity]",
+        ".reporting-entity",
+    ],
+
+    # IPCC
+    "ipcc": [
+        "[data-ipcc]",
+        ".ipcc",
+        ".ipcc-method",
+    ],
+    "ipcc_tier": [
+        "[data-ipcc-tier]",
+        ".ipcc-tier",
+        ".tier",
+    ],
+    "ipcc_tier_1": [
+        "[data-ipcc-tier-1]",
+        ".ipcc-tier-1",
+        ".tier-1",
+    ],
+    "ipcc_tier_2": [
+        "[data-ipcc-tier-2]",
+        ".ipcc-tier-2",
+        ".tier-2",
+    ],
+    "ipcc_tier_3": [
+        "[data-ipcc-tier-3]",
+        ".ipcc-tier-3",
+        ".tier-3",
+    ],
+    "ipcc_category": [
+        "[data-ipcc-category]",
+        ".ipcc-category",
+    ],
+    "ipcc_subcategory": [
+        "[data-ipcc-subcategory]",
+        ".ipcc-subcategory",
+    ],
+
+    # GHG Protocol
+    "scope_1": [
+        "[data-scope-1]",
+        ".scope-1",
+        ".scope1",
+        ".scope-one",
+    ],
+    "scope_2": [
+        "[data-scope-2]",
+        ".scope-2",
+        ".scope2",
+        ".scope-two",
+    ],
+    "scope_3": [
+        "[data-scope-3]",
+        ".scope-3",
+        ".scope3",
+        ".scope-three",
+    ],
+    "scope": [
+        "[data-scope]",
+        ".scope",
+        ".ghg-scope",
+    ],
+    "scope_3_category": [
+        "[data-scope-3-category]",
+        ".scope-3-category",
+        ".scope3-category",
+    ],
+
+    # Meteorology
+    "meteorological_data": [
+        "[data-meteorological-data]",
+        ".meteorological-data",
+        ".meteorology",
+        ".weather-data",
+    ],
+    "temperature": [
+        "[data-temperature]",
+        "[data-ambient-temperature]",
+        ".temperature",
+        ".ambient-temperature",
+    ],
+    "humidity": [
+        "[data-humidity]",
+        ".humidity",
+        ".relative-humidity",
+    ],
+    "wind_speed": [
+        "[data-wind-speed]",
+        ".wind-speed",
+        ".wind-velocity",
+    ],
+    "wind_direction": [
+        "[data-wind-direction]",
+        ".wind-direction",
+    ],
+    "pressure": [
+        "[data-pressure]",
+        ".pressure",
+        ".atmospheric-pressure",
+    ],
+    "precipitation": [
+        "[data-precipitation]",
+        ".precipitation",
+        ".rainfall",
+    ],
+    "solar_radiation": [
+        "[data-solar-radiation]",
+        ".solar-radiation",
+        ".solar-irradiance",
+    ],
+    "weather_station": [
+        "[data-weather-station]",
+        ".weather-station",
+        ".meteorological-station",
+    ],
+    "weather_date": [
+        "[data-weather-date]",
+        ".weather-date",
+        ".observation-date",
+    ],
+
+    # Monitoring
+    "monitoring": [
+        "[data-monitoring]",
+        ".monitoring",
+        ".monitoring-data",
+    ],
+    "monitoring_method": [
+        "[data-monitoring-method]",
+        ".monitoring-method",
+        ".measurement-method",
+    ],
+    "sampling_location": [
+        "[data-sampling-location]",
+        ".sampling-location",
+        ".sample-location",
+    ],
+    "sampling_point": [
+        "[data-sampling-point]",
+        ".sampling-point",
+        ".sample-point",
+    ],
+    "detection_limit": [
+        "[data-detection-limit]",
+        ".detection-limit",
+        ".lod",
+    ],
+
+    # Measurement
+    "value": [
+        "[data-value]",
+        ".value",
+        ".measurement",
+        ".measured-value",
+    ],
+    "unit": [
+        "[data-unit]",
+        ".unit",
+        ".measurement-unit",
+    ],
+    "concentration": [
+        "[data-concentration]",
+        ".concentration",
+    ],
+    "measurement_date": [
+        "[data-measurement-date]",
+        ".measurement-date",
+        ".sampling-date",
+    ],
+    "measurement_time": [
+        "[data-measurement-time]",
+        ".measurement-time",
+        ".sampling-time",
+    ],
+}
+
+
+_JSON_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "facility": (
+        "facility",
+        "facilityname",
+        "sitename",
+        "plantname",
+        "installationname",
+    ),
+    "facility_id": (
+        "facilityid",
+        "siteid",
+        "plantid",
+    ),
+    "facility_type": (
+        "facilitytype",
+        "sitetype",
+        "planttype",
+    ),
+    "operator": (
+        "operator",
+        "facilityoperator",
+        "siteoperator",
+    ),
+    "owner": (
+        "owner",
+        "facilityowner",
+        "siteowner",
+    ),
+    "methane": (
+        "methane",
+        "ch4",
+    ),
+    "methane_concentration": (
+        "methaneconcentration",
+        "ch4concentration",
+        "methaneppm",
+        "ch4ppm",
+    ),
+    "methane_emissions": (
+        "methaneemissions",
+        "ch4emissions",
+    ),
+    "co2": (
+        "co2",
+        "carbondioxide",
+    ),
+    "co2e": (
+        "co2e",
+        "co2equivalent",
+        "carbondioxideequivalent",
+    ),
+    "nitrous_oxide": (
+        "n2o",
+        "nitrousoxide",
+    ),
+    "emissions": (
+        "emissions",
+        "emission",
+        "totalemissions",
+    ),
+    "emission_factor": (
+        "emissionfactor",
+        "emissionfactors",
+    ),
+    "activity_data": (
+        "activitydata",
+        "activity",
+        "activitylevel",
+    ),
+    "inventory": (
+        "inventory",
+        "ghginventory",
+        "emissionsinventory",
+    ),
+    "inventory_year": (
+        "inventoryyear",
+        "reportingyear",
+        "baseyear",
+    ),
+    "ipcc_tier": (
+        "ipcc_tier",
+        "ipcctier",
+        "tier",
+    ),
+    "scope_1": (
+        "scope1",
+        "scope_1",
+    ),
+    "scope_2": (
+        "scope2",
+        "scope_2",
+    ),
+    "scope_3": (
+        "scope3",
+        "scope_3",
+    ),
+    "temperature": (
+        "temperature",
+        "ambienttemperature",
+        "airtemperature",
+    ),
+    "humidity": (
+        "humidity",
+        "relativehumidity",
+    ),
+    "wind_speed": (
+        "windspeed",
+        "windvelocity",
+    ),
+    "wind_direction": (
+        "winddirection",
+    ),
+    "pressure": (
+        "pressure",
+        "atmosphericpressure",
+    ),
+    "precipitation": (
+        "precipitation",
+        "rainfall",
+    ),
+    "solar_radiation": (
+        "solarradiation",
+        "solarirradiance",
+    ),
+    "weather_station": (
+        "weatherstation",
+        "meteorologicalstation",
+    ),
+}
+
+
+def _extract_environmental_field(
+    element,
+    soup: BeautifulSoup,
+    field_name: str,
+) -> str:
+
+    selectors = _FIELD_SELECTORS.get(
+        field_name,
+        [],
+    )
+
+    for selector in selectors:
+        try:
+            match = element.select_one(selector)
+        except Exception:
+            continue
+
+        if not match:
+            continue
+
+        attributes = (
+            f"data-{field_name.replace('_', '-')}",
+            "content",
+            "value",
+            "datetime",
+        )
+
+        for attribute in attributes:
+            value = match.get(attribute)
+
+            if value:
+                return _clean_text(
+                    str(value)
+                )
+
+        text = _clean_text(
+            match.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        if text:
+            return text
+
+    # JSON-LD fallback
+    aliases = _JSON_KEY_ALIASES.get(
+        field_name,
+        (),
+    )
+
+    json_names = {
+        name
+        .replace("-", "")
+        .replace("_", "")
+        .lower()
+        for name in aliases
+    }
+
+    if json_names:
+        values: list[str] = []
+
+        for document in _extract_json_ld(soup):
+            values.extend(
+                _flatten_json_values(
+                    document,
+                    json_names,
+                )
+            )
+
+        values = _unique(values)
+
+        if values:
+            return values[0]
+
+    # Meta fallback
+    meta_names = [
+        field_name,
+        field_name.replace("_", "-"),
+        field_name.replace("_", " "),
+    ]
+
+    values = _extract_meta_content(
+        soup,
+        meta_names,
+    )
+
+    if values:
+        return values[0]
+
+    # Label fallback
+    labels = [
+        field_name.replace("_", " "),
+        field_name.replace("_", "-"),
+    ]
+
+    page_text = _clean_text(
+        element.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    for label in labels:
+        pattern = re.compile(
+            rf"\b{re.escape(label)}"
+            rf"\s*[:=-]\s*"
+            rf"([^|;\n]+)",
+            re.IGNORECASE,
+        )
+
+        match = pattern.search(page_text)
+
+        if match:
+            return _clean_text(
+                match.group(1)
+            )
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Standard structured fields
+# ---------------------------------------------------------------------------
+
+_STANDARD_SELECTORS: dict[
+    str,
+    list[str],
+] = {
+    "title": [
+        ".job-title",
+        ".title",
+        "[data-testid='job-title']",
+        "[data-job-title]",
+        "h2",
+        "h3",
+    ],
     "company": [
         ".company",
         ".company-name",
-        ".company_name",
-        ".employer",
-        ".employer-name",
-        ".organization",
-        ".organisation",
         "[data-testid='company']",
-        "[data-testid='company-name']",
         "[data-company]",
     ],
-
     "location": [
         ".location",
         ".job-location",
-        ".job_location",
-        ".location-name",
-        ".location_name",
-        ".address",
-        ".city",
         "[data-testid='location']",
-        "[data-testid='job-location']",
         "[data-location]",
     ],
-
     "salary": [
         ".salary",
-        ".salary-range",
-        ".salary_range",
         ".compensation",
-        ".pay",
-        ".pay-range",
-        ".pay_range",
-        ".rate",
         "[data-testid='salary']",
         "[data-salary]",
     ],
-
     "description": [
         ".description",
         ".job-description",
-        ".job_description",
-        ".summary",
-        ".job-summary",
-        ".job_summary",
-        ".details",
         "[data-testid='description']",
-        "[data-testid='job-description']",
         "[data-description]",
     ],
-
     "posted_date": [
-        "time[datetime]",
         "time",
         ".posted-date",
-        ".posted_date",
-        ".date-posted",
-        ".date_posted",
-        ".posting-date",
-        ".posting_date",
         ".date",
         "[data-testid='posted-date']",
         "[data-posted-date]",
     ],
-
     "application_url": [
         "a[href*='apply']",
-        "a[href*='application']",
         "a.apply",
         ".apply a",
-        ".application a",
-        "[data-testid='apply']",
-        "[data-testid='application-link']",
+        "[data-application-url]",
     ],
-
     "url": [
         "a[href]",
+        "link[href]",
     ],
-
     "email": [
         "a[href^='mailto:']",
         ".email",
         "[data-email]",
     ],
-
     "phone": [
         "a[href^='tel:']",
         ".phone",
         ".telephone",
         "[data-phone]",
-    ],
-
-    "latitude": [
-        "[data-latitude]",
-        "[data-lat]",
-        ".latitude",
-    ],
-
-    "longitude": [
-        "[data-longitude]",
-        "[data-lng]",
-        "[data-lon]",
-        ".longitude",
-    ],
-
-    "coordinates": [
-        "[data-coordinates]",
-        ".coordinates",
-        ".geo",
     ],
 }
 
@@ -491,26 +1097,45 @@ def _extract_field(
     element,
     field_name: str,
     base_url: str,
+    soup: BeautifulSoup | None = None,
 ) -> str:
 
-    selectors = FIELD_SELECTORS.get(
+    selectors = _STANDARD_SELECTORS.get(
         field_name,
-        [f".{field_name}"],
+        [],
     )
 
     for selector in selectors:
-
-        match = element.select_one(selector)
+        try:
+            match = element.select_one(selector)
+        except Exception:
+            continue
 
         if not match:
             continue
 
-        # URLs
-        if field_name in {
-            "application_url",
-            "url",
-        }:
+        # Application URL
+        if field_name == "application_url":
+            href = match.get("href")
 
+            if href:
+                return urljoin(
+                    base_url,
+                    str(href),
+                )
+
+            data_url = match.get(
+                "data-application-url"
+            )
+
+            if data_url:
+                return urljoin(
+                    base_url,
+                    str(data_url),
+                )
+
+        # Generic URL
+        if field_name == "url":
             href = match.get("href")
 
             if href:
@@ -521,81 +1146,54 @@ def _extract_field(
 
         # Email
         if field_name == "email":
-
             href = match.get("href")
 
-            if href and str(href).startswith(
+            if href and str(href).lower().startswith(
                 "mailto:"
             ):
                 return str(href)[7:]
 
-            data_email = match.get("data-email")
+            data_email = match.get(
+                "data-email"
+            )
 
             if data_email:
-                return str(data_email)
+                return _clean_text(
+                    str(data_email)
+                )
 
         # Phone
         if field_name == "phone":
-
             href = match.get("href")
 
-            if href and str(href).startswith(
+            if href and str(href).lower().startswith(
                 "tel:"
             ):
                 return str(href)[4:]
 
-            data_phone = match.get("data-phone")
+            data_phone = match.get(
+                "data-phone"
+            )
 
             if data_phone:
-                return str(data_phone)
-
-        # Latitude
-        if field_name == "latitude":
-
-            value = (
-                match.get("data-latitude")
-                or match.get("data-lat")
-                or match.get("content")
-            )
-
-            if value:
-                return _clean_text(str(value))
-
-        # Longitude
-        if field_name == "longitude":
-
-            value = (
-                match.get("data-longitude")
-                or match.get("data-lng")
-                or match.get("data-lon")
-                or match.get("content")
-            )
-
-            if value:
-                return _clean_text(str(value))
-
-        # Coordinates
-        if field_name == "coordinates":
-
-            value = (
-                match.get("data-coordinates")
-                or match.get("content")
-            )
-
-            if value:
-                return _clean_text(str(value))
-
-        # Posted date
-        if field_name == "posted_date":
-
-            datetime_value = match.get("datetime")
-
-            if datetime_value:
                 return _clean_text(
-                    str(datetime_value)
+                    str(data_phone)
                 )
 
-        # Normal text
+        # Attribute-based values
+        for attribute in (
+            f"data-{field_name.replace('_', '-')}",
+            "content",
+            "datetime",
+            "value",
+        ):
+            value = match.get(attribute)
+
+            if value:
+                return _clean_text(
+                    str(value)
+                )
+
         text = _clean_text(
             match.get_text(
                 " ",
@@ -605,6 +1203,17 @@ def _extract_field(
 
         if text:
             return text
+
+    # Environmental extraction
+    if soup is not None:
+        value = _extract_environmental_field(
+            element,
+            soup,
+            field_name,
+        )
+
+        if value:
+            return value
 
     return ""
 
@@ -616,167 +1225,101 @@ def _extract_field(
 def _find_record_elements(
     soup: BeautifulSoup,
 ):
+    """
+    Find repeated content containers.
+
+    Important:
+    We intentionally prioritize job/listing containers before
+    generic page-level elements such as h1.
+    """
+
     selectors = [
-
-        # Explicit job records
-        "article.job",
-        "article.job-card",
-        "article.job-listing",
-
+        "[data-testid='job-card']",
+        "[data-testid='job']",
+        "[data-job]",
         ".job-card",
         ".job-listing",
-        ".job-item",
         ".job",
-
-        "[data-testid='job']",
-        "[data-testid='job-card']",
-        "[data-testid='job-listing']",
-
-        "[data-job-id]",
-        "[data-job]",
+        "article.job",
+        "article[data-job]",
+        ".listing-card",
+        ".listing",
+        ".facility-card",
+        ".facility",
+        ".emission-record",
+        ".emission",
+        ".inventory-record",
+        ".monitoring-record",
+        ".data-record",
+        ".record",
+        "article",
     ]
 
     for selector in selectors:
+        try:
+            elements = soup.select(selector)
+        except Exception:
+            continue
 
-        elements = soup.select(selector)
+        if not elements:
+            continue
 
-        if elements:
+        # Avoid selecting a single page wrapper when there
+        # are clearly repeated records.
+        if len(elements) >= 2:
             return elements
 
-    # Generic article fallback
-    articles = soup.find_all("article")
+    # If exactly one article exists, it may still be a record.
+    articles = soup.select("article")
 
-    if articles:
+    if len(articles) == 1:
         return articles
 
     return [soup]
 
 
 # ---------------------------------------------------------------------------
-# JSON-LD record extraction
+# Detect whether a plan is page-level
 # ---------------------------------------------------------------------------
 
-def _json_ld_job_records(
-    soup: BeautifulSoup,
-) -> list[dict[str, Any]]:
+def _is_page_level_plan(
+    plan: ExtractionPlan,
+) -> bool:
+    """
+    Determine whether an extraction plan should operate on the
+    entire page rather than repeated record elements.
 
-    records: list[dict[str, Any]] = []
+    Important:
+    ``title`` is a standard record field in UWDE job/listing
+    extraction, so it must NOT automatically make a plan
+    page-level.
 
-    for document in _extract_json_ld(soup):
+    A plan containing only genuine page-level fields is treated
+    as page-level extraction.
+    """
 
-        job_type = document.get("@type")
+    page_fields = {
+        "headings",
+        "paragraphs",
+        "links",
+        "images",
+        "latitude",
+        "longitude",
+        "coordinates",
+    }
 
-        types = job_type if isinstance(
-            job_type,
-            list,
-        ) else [job_type]
+    field_names = {
+        field.name
+        for field in plan.fields
+    }
 
-        if "JobPosting" not in types:
-            continue
-
-        record: dict[str, Any] = {}
-
-        title = document.get("title")
-
-        if title:
-            record["title"] = _clean_text(
-                str(title)
-            )
-
-        company = document.get("hiringOrganization")
-
-        if isinstance(company, dict):
-            company_name = company.get("name")
-
-            if company_name:
-                record["company"] = _clean_text(
-                    str(company_name)
-                )
-
-        location = document.get("jobLocation")
-
-        if isinstance(location, dict):
-
-            address = location.get("address")
-
-            if isinstance(address, dict):
-
-                parts = []
-
-                for key in [
-                    "streetAddress",
-                    "addressLocality",
-                    "addressRegion",
-                    "postalCode",
-                    "addressCountry",
-                ]:
-                    value = address.get(key)
-
-                    if value:
-                        parts.append(
-                            _clean_text(str(value))
-                        )
-
-                if parts:
-                    record["location"] = ", ".join(parts)
-
-        salary = document.get("baseSalary")
-
-        if isinstance(salary, dict):
-
-            value = salary.get("value")
-
-            if isinstance(value, dict):
-                value = value.get("value")
-
-            if value is not None:
-                record["salary"] = _clean_text(
-                    str(value)
-                )
-
-        description = document.get(
-            "description"
-        )
-
-        if description:
-            description_soup = BeautifulSoup(
-                str(description),
-                "html.parser",
-            )
-
-            record["description"] = _clean_text(
-                description_soup.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-        posted_date = document.get(
-            "datePosted"
-        )
-
-        if posted_date:
-            record["posted_date"] = _clean_text(
-                str(posted_date)
-            )
-
-        application_url = document.get(
-            "url"
-        )
-
-        if application_url:
-            record["application_url"] = _clean_text(
-                str(application_url)
-            )
-
-        if record:
-            records.append(record)
-
-    return records
-
+    return bool(
+        field_names
+        and field_names.issubset(page_fields)
+    )
 
 # ---------------------------------------------------------------------------
-# Main extraction function
+# Main extraction
 # ---------------------------------------------------------------------------
 
 def execute_extraction(
@@ -795,36 +1338,16 @@ def execute_extraction(
         "html.parser",
     )
 
-    requested_fields = {
+    field_names = {
         field.name
         for field in plan.fields
     }
 
-    # -----------------------------------------------------------------------
-    # Page-level extraction
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # Pure page-level extraction
+    # ---------------------------------------------------------------
 
-    general_fields = {
-        "page_title",
-        "headings",
-        "paragraphs",
-        "links",
-        "images",
-        "latitude",
-        "longitude",
-        "coordinates",
-    }
-
-    # "title" is NOT treated as a general field here.
-    #
-    # This is important:
-    # "job title" should be extracted from each job record,
-    # not from <title> of the entire HTML page.
-    page_fields = requested_fields.intersection(
-        general_fields
-    )
-
-    if page_fields:
+    if _is_page_level_plan(plan):
 
         record: dict[str, Any] = {}
 
@@ -832,14 +1355,13 @@ def execute_extraction(
         longitude = ""
         coordinates = ""
 
-        if requested_fields.intersection(
+        if field_names.intersection(
             {
                 "latitude",
                 "longitude",
                 "coordinates",
             }
         ):
-
             (
                 latitude,
                 longitude,
@@ -848,80 +1370,46 @@ def execute_extraction(
                 soup
             )
 
-        for field_name in page_fields:
+        for field in plan.fields:
+            value = ""
 
-            if field_name == "latitude":
-                value = latitude
-
-            elif field_name == "longitude":
-                value = longitude
-
-            elif field_name == "coordinates":
-                value = coordinates
-
-            else:
+            if field.name in {
+                "title",
+                "headings",
+                "paragraphs",
+                "links",
+                "images",
+            }:
                 value = _extract_general_field(
                     soup,
-                    field_name,
+                    field.name,
                     base_url,
                 )
 
-            if value:
-                record[field_name] = value
+            elif field.name == "latitude":
+                value = latitude
 
-        if record and not requested_fields.intersection(
-            {
-                "title",
-                "company",
-                "location",
-                "salary",
-                "description",
-                "posted_date",
-                "application_url",
-                "url",
-                "email",
-                "phone",
-            }
-        ):
+            elif field.name == "longitude":
+                value = longitude
+
+            elif field.name == "coordinates":
+                value = coordinates
+
+            if value:
+                record[field.name] = value
+
+        if record:
             return ExtractionResult(
                 records=[record]
             )
 
-    # -----------------------------------------------------------------------
-    # Try structured JobPosting JSON-LD first
-    # -----------------------------------------------------------------------
+        return ExtractionResult(
+            records=[]
+        )
 
-    json_records = _json_ld_job_records(
-        soup
-    )
-
-    if json_records:
-
-        filtered_records = []
-
-        for source_record in json_records:
-
-            record = {}
-
-            for field_name in requested_fields:
-
-                if field_name in source_record:
-
-                    record[field_name] = (
-                        source_record[field_name]
-                    )
-
-            if record:
-                filtered_records.append(record)
-
-        if filtered_records:
-            return ExtractionResult(
-                records=filtered_records
-            )
-
-    # -----------------------------------------------------------------------
-    # HTML record extraction
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # Repeated-record extraction
+    # ---------------------------------------------------------------
 
     record_elements = _find_record_elements(
         soup
@@ -930,84 +1418,72 @@ def execute_extraction(
     records: list[dict[str, Any]] = []
 
     for element in record_elements:
-
         record: dict[str, Any] = {}
 
         for field in plan.fields:
-
-            field_name = field.name
-
-            # Page-level fields should not be extracted
-            # repeatedly from every record.
-            if field_name in general_fields:
-                continue
-
             value = _extract_field(
                 element,
-                field_name,
+                field.name,
                 base_url,
+                soup,
             )
 
             if value:
-                record[field_name] = value
+                record[field.name] = value
 
-        # Only add genuine structured records.
         if record:
             records.append(record)
 
-    # -----------------------------------------------------------------------
-    # If record extraction produced nothing, attempt a more intelligent
-    # heading-based fallback.
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # Important fallback:
+    #
+    # If generic record detection found the whole page, do not return
+    # the page title as a fake job record. Try article/job selectors
+    # once more.
+    # ---------------------------------------------------------------
 
-    if not records:
+    if (
+        len(records) == 1
+        and record_elements
+        and record_elements[0] is soup
+    ):
+        fallback_selectors = [
+            "[data-testid='job-card']",
+            "[data-testid='job']",
+            ".job-card",
+            ".job-listing",
+            ".job",
+            "article",
+        ]
 
-        headings = soup.find_all(
-            ["h2", "h3"]
-        )
+        fallback_elements = []
 
-        for heading in headings:
+        for selector in fallback_selectors:
+            found = soup.select(selector)
 
-            title = _clean_text(
-                heading.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
+            if len(found) >= 2:
+                fallback_elements = found
+                break
 
-            if not title:
-                continue
+        if fallback_elements:
+            records = []
 
-            # Look for the closest useful container.
-            container = heading.parent
+            for element in fallback_elements:
+                record: dict[str, Any] = {}
 
-            if not container:
-                continue
+                for field in plan.fields:
+                    value = _extract_field(
+                        element,
+                        field.name,
+                        base_url,
+                        soup,
+                    )
 
-            record = {}
+                    if value:
+                        record[field.name] = value
 
-            if "title" in requested_fields:
-                record["title"] = title
-
-            for field_name in requested_fields:
-
-                if field_name == "title":
-                    continue
-
-                if field_name in general_fields:
-                    continue
-
-                value = _extract_field(
-                    container,
-                    field_name,
-                    base_url,
-                )
-
-                if value:
-                    record[field_name] = value
-
-            if record:
-                records.append(record)
+                if record:
+                    records.append(record)
 
     return ExtractionResult(
         records=records
