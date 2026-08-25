@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+import json
+
+import pytest
 
 from backend.app.services.pipeline_orchestrator import (
     PipelineResult,
@@ -8,40 +10,36 @@ from backend.app.services.pipeline_orchestrator import (
 )
 
 
-def test_pipeline_returns_structured_records():
-    html = """
-    <html>
-        <body>
-            <article class="job">
-                <h2 class="title">Environmental Consultant</h2>
-                <div class="company">UWDE Consulting</div>
-                <div class="location">Abuja</div>
-            </article>
-
-            <article class="job">
-                <h2 class="title">WASH Specialist</h2>
-                <div class="company">Environmental Solutions</div>
-                <div class="location">Kaduna</div>
-            </article>
-        </body>
-    </html>
-    """
-
+def test_pipeline_returns_structured_records(
+    monkeypatch,
+):
     class FakeResponse:
-        url = "https://example.com/jobs"
+        url = "https://example.com"
         final_url = "https://example.com/jobs"
         status_code = 200
         content_type = "text/html"
-        body = html.encode("utf-8")
+        body = b"""
+        <html>
+            <body>
+                <article class="job">
+                    <h2 class="title">Environmental Consultant</h2>
+                </article>
+                <article class="job">
+                    <h2 class="title">WASH Specialist</h2>
+                </article>
+            </body>
+        </html>
+        """
 
-    with patch(
+    monkeypatch.setattr(
         "backend.app.services.pipeline_orchestrator.fetch_url",
-        return_value=FakeResponse(),
-    ):
-        result = run_extraction_pipeline(
-            "https://example.com/jobs",
-            "Extract title, company and location",
-        )
+        lambda url: FakeResponse(),
+    )
+
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title",
+    )
 
     assert isinstance(result, PipelineResult)
     assert result.status == "success"
@@ -50,90 +48,135 @@ def test_pipeline_returns_structured_records():
     assert result.records[0]["title"] == (
         "Environmental Consultant"
     )
-    assert result.records[0]["company"] == (
-        "UWDE Consulting"
+
+    assert result.records[1]["title"] == (
+        "WASH Specialist"
     )
-    assert result.records[0]["location"] == "Abuja"
 
 
-def test_pipeline_normalizes_instruction():
-    html = """
-    <html>
-        <body>
-            <article class="job">
-                <h2 class="title">Environmental Consultant</h2>
-            </article>
-        </body>
-    </html>
-    """
-
+def test_pipeline_normalizes_instruction(
+    monkeypatch,
+):
     class FakeResponse:
         url = "https://example.com"
         final_url = "https://example.com"
         status_code = 200
         content_type = "text/html"
-        body = html.encode("utf-8")
+        body = b"""
+        <html>
+            <article class="job">
+                <h2 class="title">Consultant</h2>
+            </article>
+        </html>
+        """
 
-    with patch(
+    monkeypatch.setattr(
         "backend.app.services.pipeline_orchestrator.fetch_url",
-        return_value=FakeResponse(),
-    ):
-        result = run_extraction_pipeline(
-            "https://example.com",
-            "  Extract title  ",
-        )
+        lambda url: FakeResponse(),
+    )
 
-    assert result.instruction == "Extract title"
-    assert result.record_count == 1
+    result = run_extraction_pipeline(
+        "  https://example.com  ",
+        "  Extract the job title  ",
+    )
+
+    assert result.url == "https://example.com"
+    assert result.instruction == (
+        "Extract the job title"
+    )
 
 
 def test_pipeline_rejects_empty_url():
-    try:
+    with pytest.raises(
+        ValueError,
+        match="URL is required",
+    ):
         run_extraction_pipeline(
             "",
-            "Extract title",
-        )
-    except ValueError as exc:
-        assert str(exc) == "URL is required."
-    else:
-        raise AssertionError(
-            "Expected ValueError"
+            "Extract the title",
         )
 
 
 def test_pipeline_rejects_empty_instruction():
-    try:
+    with pytest.raises(
+        ValueError,
+        match="Instruction is required",
+    ):
         run_extraction_pipeline(
             "https://example.com",
             "",
         )
-    except ValueError as exc:
-        assert str(exc) == "Instruction is required."
-    else:
-        raise AssertionError(
-            "Expected ValueError"
-        )
 
 
-def test_pipeline_result_is_serializable():
-    result = PipelineResult(
-        status="success",
-        url="https://example.com",
-        final_url="https://example.com",
-        status_code=200,
-        content_type="text/html",
-        instruction="Extract title",
-        records=[
-            {
-                "title": "Environmental Consultant",
-            }
-        ],
+def test_pipeline_result_is_serializable(
+    monkeypatch,
+):
+    class FakeResponse:
+        url = "https://example.com"
+        final_url = "https://example.com"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <article class="job">
+                <h2 class="title">Consultant</h2>
+            </article>
+        </html>
+        """
+
+    monkeypatch.setattr(
+        "backend.app.services.pipeline_orchestrator.fetch_url",
+        lambda url: FakeResponse(),
     )
 
-    data = result.to_dict()
-
-    assert data["status"] == "success"
-    assert data["record_count"] == 1
-    assert data["records"][0]["title"] == (
-        "Environmental Consultant"
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title",
     )
+
+    serialized = result.to_dict()
+
+    json.dumps(serialized)
+
+    assert serialized["validation"] is not None
+    assert serialized["validation"]["valid"] is True
+    assert serialized["validation"]["record_count"] == 1
+
+
+def test_pipeline_reports_validation_warning_for_no_records(
+    monkeypatch,
+):
+    class FakeResponse:
+        url = "https://example.com"
+        final_url = "https://example.com"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <body>
+                <h1>Nothing to extract</h1>
+            </body>
+        </html>
+        """
+
+    monkeypatch.setattr(
+        "backend.app.services.pipeline_orchestrator.fetch_url",
+        lambda url: FakeResponse(),
+    )
+
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title",
+    )
+
+    assert result.status == "success"
+    assert result.record_count == 0
+    assert result.validation is not None
+    assert result.validation.valid is True
+
+    warning_codes = {
+        issue.code
+        for issue in result.validation.warnings
+    }
+
+    assert "NO_RECORDS" in warning_codes

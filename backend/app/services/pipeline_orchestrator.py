@@ -15,16 +15,35 @@ from backend.app.services.http_fetcher import (
     FetchError,
     fetch_url,
 )
+from backend.app.services.pipeline_validator import (
+    PipelineValidationResult,
+    validate_pipeline_input,
+    validate_pipeline_output,
+)
 
 
 @dataclass
 class PipelineResult:
     """
-    Result returned by the UWDE extraction pipeline.
+    Result returned by the complete UWDE extraction pipeline.
 
-    The orchestrator is intentionally lightweight:
-    it coordinates existing services rather than reimplementing
-    fetching, planning, or extraction logic.
+    Pipeline:
+
+        URL
+          ↓
+        Input validation
+          ↓
+        Extraction plan
+          ↓
+        HTTP fetch
+          ↓
+        HTML decoding
+          ↓
+        Structured extraction
+          ↓
+        Output validation
+          ↓
+        Validated pipeline result
     """
 
     status: str
@@ -34,14 +53,25 @@ class PipelineResult:
     content_type: str
     instruction: str
     plan: ExtractionPlan | None = None
-    records: list[dict[str, Any]] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    errors: list[str] = field(
+        default_factory=list
+    )
+    validation: PipelineValidationResult | None = None
 
     @property
     def record_count(self) -> int:
         return len(self.records)
 
     def to_dict(self) -> dict[str, Any]:
+        validation_data = (
+            self.validation.to_dict()
+            if self.validation
+            else None
+        )
+
         return {
             "status": self.status,
             "url": self.url,
@@ -49,10 +79,15 @@ class PipelineResult:
             "status_code": self.status_code,
             "content_type": self.content_type,
             "instruction": self.instruction,
-            "plan": self.plan.to_dict() if self.plan else None,
+            "plan": (
+                self.plan.to_dict()
+                if self.plan
+                else None
+            ),
             "records": self.records,
             "record_count": self.record_count,
             "errors": self.errors,
+            "validation": validation_data,
         }
 
 
@@ -61,40 +96,35 @@ def run_extraction_pipeline(
     instruction: str,
 ) -> PipelineResult:
     """
-    Execute the core UWDE extraction pipeline.
-
-    Pipeline:
-
-        URL
-          ↓
-        Extraction plan
-          ↓
-        HTTP fetch
-          ↓
-        HTML decoding
-          ↓
-        Extraction
-          ↓
-        Structured result
-
-    Existing services remain responsible for their own concerns:
-
-        extraction_engine  -> planning
-        http_fetcher       -> HTTP retrieval
-        extraction_executor -> structured extraction
+    Execute the complete UWDE extraction pipeline.
     """
 
     normalized_url = str(url).strip()
-    normalized_instruction = str(instruction).strip()
-
-    if not normalized_url:
-        raise ValueError("URL is required.")
-
-    if not normalized_instruction:
-        raise ValueError("Instruction is required.")
+    normalized_instruction = str(
+        instruction
+    ).strip()
 
     # ---------------------------------------------------------------
-    # 1. Build extraction plan
+    # 1. Validate pipeline input
+    # ---------------------------------------------------------------
+
+    input_validation = validate_pipeline_input(
+        url=normalized_url,
+        instruction=normalized_instruction,
+    )
+
+    if not input_validation.valid:
+        errors = [
+            issue.message
+            for issue in input_validation.errors
+        ]
+
+        raise ValueError(
+            "; ".join(errors)
+        )
+
+    # ---------------------------------------------------------------
+    # 2. Build extraction plan
     # ---------------------------------------------------------------
 
     plan = build_extraction_plan(
@@ -102,7 +132,7 @@ def run_extraction_pipeline(
     )
 
     # ---------------------------------------------------------------
-    # 2. Fetch website
+    # 3. Fetch website
     # ---------------------------------------------------------------
 
     try:
@@ -113,7 +143,7 @@ def run_extraction_pipeline(
         raise
 
     # ---------------------------------------------------------------
-    # 3. Decode response body
+    # 4. Decode response body
     # ---------------------------------------------------------------
 
     html = fetched.body.decode(
@@ -122,7 +152,7 @@ def run_extraction_pipeline(
     )
 
     # ---------------------------------------------------------------
-    # 4. Execute extraction
+    # 5. Execute extraction
     # ---------------------------------------------------------------
 
     result: ExtractionResult = execute_extraction(
@@ -131,17 +161,56 @@ def run_extraction_pipeline(
         base_url=fetched.final_url,
     )
 
+    records = result.records
+
     # ---------------------------------------------------------------
-    # 5. Return normalized pipeline result
+    # 6. Validate pipeline output
+    #
+    # We deliberately do not require every extracted field here.
+    # The extraction plan determines which fields are requested,
+    # while the validator checks structural integrity and empty
+    # output.
+    # ---------------------------------------------------------------
+
+    validation = validate_pipeline_output(
+        records=records,
+    )
+
+    # ---------------------------------------------------------------
+    # 7. Convert validation errors into pipeline errors
+    # ---------------------------------------------------------------
+
+    errors = [
+        issue.message
+        for issue in validation.errors
+    ]
+
+    # Warnings do not fail the pipeline.
+    #
+    # Example:
+    # NO_RECORDS is currently a warning.
+    #
+    # Therefore a technically valid pipeline may still contain
+    # validation warnings.
+    status = (
+        "success"
+        if validation.valid
+        else "validation_failed"
+    )
+
+    # ---------------------------------------------------------------
+    # 8. Return validated pipeline result
     # ---------------------------------------------------------------
 
     return PipelineResult(
-        status="success",
+        status=status,
         url=fetched.url,
         final_url=fetched.final_url,
         status_code=fetched.status_code,
         content_type=fetched.content_type,
         instruction=normalized_instruction,
         plan=plan,
-        records=result.records,
+        records=records,
+        errors=errors,
+        validation=validation,
     )
