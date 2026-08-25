@@ -15,15 +15,16 @@ from backend.app.services.http_fetcher import (
     FetchError,
     fetch_url,
 )
+from backend.app.services.pipeline_observability import (
+    PipelineExecutionMetadata,
+    PipelineExecutionTracker,
+)
 from backend.app.services.pipeline_validator import (
     PipelineValidationResult,
     validate_pipeline_input,
     validate_pipeline_output,
 )
-from backend.app.services.pipeline_observability import (
-    PipelineExecutionMetadata,
-    PipelineExecutionTracker,
-)
+
 
 @dataclass
 class PipelineResult:
@@ -76,6 +77,12 @@ class PipelineResult:
             else None
         )
 
+        observability_data = (
+            self.observability.to_dict()
+            if self.observability
+            else None
+        )
+
         return {
             "status": self.status,
             "url": self.url,
@@ -92,6 +99,7 @@ class PipelineResult:
             "record_count": self.record_count,
             "errors": self.errors,
             "validation": validation_data,
+            "observability": observability_data,
         }
 
 
@@ -100,26 +108,8 @@ def run_extraction_pipeline(
     instruction: str,
 ) -> PipelineResult:
     """
-    Execute the complete UWDE extraction pipeline with execution
-    observability.
-
-    Pipeline:
-
-        URL
-          ↓
-        Input validation
-          ↓
-        Extraction plan
-          ↓
-        HTTP fetch
-          ↓
-        HTML decoding
-          ↓
-        Structured extraction
-          ↓
-        Output validation
-          ↓
-        Validated pipeline result
+    Execute the complete UWDE extraction pipeline
+    with execution observability.
     """
 
     tracker = PipelineExecutionTracker()
@@ -147,7 +137,9 @@ def run_extraction_pipeline(
                 for issue in input_validation.errors
             ]
 
-            error = ValueError("; ".join(errors))
+            error = ValueError(
+                "; ".join(errors)
+            )
 
             tracker.fail(
                 "validation",
@@ -182,11 +174,10 @@ def run_extraction_pipeline(
         tracker.complete_stage("planning")
 
     except Exception as exc:
-        metadata = tracker.fail(
+        tracker.fail(
             "planning",
             exc,
         )
-
         raise
 
     # ---------------------------------------------------------------
@@ -299,21 +290,11 @@ def run_extraction_pipeline(
     # ---------------------------------------------------------------
 
     tracker.start_stage("completed")
+    tracker.complete_stage("completed")
 
     observability = tracker.complete(
         status=status
     )
-
-    completed_stage = next(
-        stage
-        for stage in observability.stages
-        if stage.name == "completed"
-    )
-
-    completed_stage.status = "completed"
-    completed_stage.started_at = observability.completed_at
-    completed_stage.completed_at = observability.completed_at
-    completed_stage.duration_ms = 0.0
 
     # ---------------------------------------------------------------
     # 8. Return validated pipeline result

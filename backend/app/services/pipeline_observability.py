@@ -61,7 +61,7 @@ class PipelineExecutionMetadata:
 
 class PipelineExecutionTracker:
     """
-    Tracks execution metadata for a single pipeline run.
+    Tracks execution metadata for a single UWDE pipeline run.
     """
 
     def __init__(self) -> None:
@@ -133,7 +133,11 @@ class PipelineExecutionTracker:
         self.metadata.failure_stage = stage_name
         self.metadata.failure_type = (
             failure_type
-            or error.__class__.__name__
+            or (
+                error.__class__.__name__
+                if isinstance(error, Exception)
+                else "PipelineError"
+            )
         )
 
     def complete(
