@@ -20,7 +20,10 @@ from backend.app.services.pipeline_validator import (
     validate_pipeline_input,
     validate_pipeline_output,
 )
-
+from backend.app.services.pipeline_observability import (
+    PipelineExecutionMetadata,
+    PipelineExecutionTracker,
+)
 
 @dataclass
 class PipelineResult:
@@ -60,6 +63,7 @@ class PipelineResult:
         default_factory=list
     )
     validation: PipelineValidationResult | None = None
+    observability: PipelineExecutionMetadata | None = None
 
     @property
     def record_count(self) -> int:
@@ -96,8 +100,29 @@ def run_extraction_pipeline(
     instruction: str,
 ) -> PipelineResult:
     """
-    Execute the complete UWDE extraction pipeline.
+    Execute the complete UWDE extraction pipeline with execution
+    observability.
+
+    Pipeline:
+
+        URL
+          ↓
+        Input validation
+          ↓
+        Extraction plan
+          ↓
+        HTTP fetch
+          ↓
+        HTML decoding
+          ↓
+        Structured extraction
+          ↓
+        Output validation
+          ↓
+        Validated pipeline result
     """
+
+    tracker = PipelineExecutionTracker()
 
     normalized_url = str(url).strip()
     normalized_instruction = str(
@@ -108,95 +133,187 @@ def run_extraction_pipeline(
     # 1. Validate pipeline input
     # ---------------------------------------------------------------
 
-    input_validation = validate_pipeline_input(
-        url=normalized_url,
-        instruction=normalized_instruction,
-    )
+    tracker.start_stage("validation")
 
-    if not input_validation.valid:
-        errors = [
-            issue.message
-            for issue in input_validation.errors
-        ]
-
-        raise ValueError(
-            "; ".join(errors)
+    try:
+        input_validation = validate_pipeline_input(
+            url=normalized_url,
+            instruction=normalized_instruction,
         )
+
+        if not input_validation.valid:
+            errors = [
+                issue.message
+                for issue in input_validation.errors
+            ]
+
+            error = ValueError("; ".join(errors))
+
+            tracker.fail(
+                "validation",
+                error,
+                failure_type="PipelineInputValidationError",
+            )
+
+            raise error
+
+        tracker.complete_stage("validation")
+
+    except Exception:
+        if tracker.metadata.status != "failed":
+            tracker.fail(
+                "validation",
+                "Pipeline input validation failed",
+                failure_type="PipelineInputValidationError",
+            )
+        raise
 
     # ---------------------------------------------------------------
     # 2. Build extraction plan
     # ---------------------------------------------------------------
 
-    plan = build_extraction_plan(
-        normalized_instruction
-    )
+    tracker.start_stage("planning")
+
+    try:
+        plan = build_extraction_plan(
+            normalized_instruction
+        )
+
+        tracker.complete_stage("planning")
+
+    except Exception as exc:
+        metadata = tracker.fail(
+            "planning",
+            exc,
+        )
+
+        raise
 
     # ---------------------------------------------------------------
     # 3. Fetch website
     # ---------------------------------------------------------------
 
+    tracker.start_stage("fetching")
+
     try:
         fetched = fetch_url(
             normalized_url
         )
-    except FetchError:
+
+        tracker.complete_stage("fetching")
+
+    except FetchError as exc:
+        tracker.fail(
+            "fetching",
+            exc,
+        )
+        raise
+
+    except Exception as exc:
+        tracker.fail(
+            "fetching",
+            exc,
+        )
         raise
 
     # ---------------------------------------------------------------
     # 4. Decode response body
     # ---------------------------------------------------------------
 
-    html = fetched.body.decode(
-        "utf-8",
-        errors="replace",
-    )
+    tracker.start_stage("decoding")
+
+    try:
+        html = fetched.body.decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        tracker.complete_stage("decoding")
+
+    except Exception as exc:
+        tracker.fail(
+            "decoding",
+            exc,
+        )
+        raise
 
     # ---------------------------------------------------------------
     # 5. Execute extraction
     # ---------------------------------------------------------------
 
-    result: ExtractionResult = execute_extraction(
-        html=html,
-        plan=plan,
-        base_url=fetched.final_url,
-    )
+    tracker.start_stage("extraction")
 
-    records = result.records
+    try:
+        result: ExtractionResult = execute_extraction(
+            html=html,
+            plan=plan,
+            base_url=fetched.final_url,
+        )
+
+        records = result.records
+
+        tracker.complete_stage("extraction")
+
+    except Exception as exc:
+        tracker.fail(
+            "extraction",
+            exc,
+        )
+        raise
 
     # ---------------------------------------------------------------
     # 6. Validate pipeline output
-    #
-    # We deliberately do not require every extracted field here.
-    # The extraction plan determines which fields are requested,
-    # while the validator checks structural integrity and empty
-    # output.
     # ---------------------------------------------------------------
 
-    validation = validate_pipeline_output(
-        records=records,
+    tracker.start_stage("quality_validation")
+
+    try:
+        validation = validate_pipeline_output(
+            records=records,
+        )
+
+        errors = [
+            issue.message
+            for issue in validation.errors
+        ]
+
+        status = (
+            "success"
+            if validation.valid
+            else "validation_failed"
+        )
+
+        tracker.complete_stage(
+            "quality_validation"
+        )
+
+    except Exception as exc:
+        tracker.fail(
+            "quality_validation",
+            exc,
+        )
+        raise
+
+    # ---------------------------------------------------------------
+    # 7. Complete pipeline
+    # ---------------------------------------------------------------
+
+    tracker.start_stage("completed")
+
+    observability = tracker.complete(
+        status=status
     )
 
-    # ---------------------------------------------------------------
-    # 7. Convert validation errors into pipeline errors
-    # ---------------------------------------------------------------
-
-    errors = [
-        issue.message
-        for issue in validation.errors
-    ]
-
-    # Warnings do not fail the pipeline.
-    #
-    # Example:
-    # NO_RECORDS is currently a warning.
-    #
-    # Therefore a technically valid pipeline may still contain
-    # validation warnings.
-    status = (
-        "success"
-        if validation.valid
-        else "validation_failed"
+    completed_stage = next(
+        stage
+        for stage in observability.stages
+        if stage.name == "completed"
     )
+
+    completed_stage.status = "completed"
+    completed_stage.started_at = observability.completed_at
+    completed_stage.completed_at = observability.completed_at
+    completed_stage.duration_ms = 0.0
 
     # ---------------------------------------------------------------
     # 8. Return validated pipeline result
@@ -204,7 +321,7 @@ def run_extraction_pipeline(
 
     return PipelineResult(
         status=status,
-        url=fetched.url,
+        url=normalized_url,
         final_url=fetched.final_url,
         status_code=fetched.status_code,
         content_type=fetched.content_type,
@@ -213,4 +330,5 @@ def run_extraction_pipeline(
         records=records,
         errors=errors,
         validation=validation,
+        observability=observability,
     )

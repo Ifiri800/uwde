@@ -136,11 +136,14 @@ class PipelineExecutionTracker:
             or error.__class__.__name__
         )
 
-    def complete(self) -> PipelineExecutionMetadata:
+    def complete(
+        self,
+        status: str = "success",
+    ) -> PipelineExecutionMetadata:
         now = datetime.now(timezone.utc)
 
         self.metadata.completed_at = now.isoformat()
-        self.metadata.status = "success"
+        self.metadata.status = status
 
         self.metadata.duration_ms = (
             now - self._started

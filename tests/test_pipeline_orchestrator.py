@@ -180,3 +180,109 @@ def test_pipeline_reports_validation_warning_for_no_records(
     }
 
     assert "NO_RECORDS" in warning_codes
+
+
+def test_pipeline_records_observability_metadata(
+    monkeypatch,
+):
+    class FakeResponse:
+        url = "https://example.com"
+        final_url = "https://example.com/jobs"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <body>
+                <article class="job">
+                    <h2 class="title">Environmental Consultant</h2>
+                </article>
+            </body>
+        </html>
+        """
+
+    monkeypatch.setattr(
+        "backend.app.services.pipeline_orchestrator.fetch_url",
+        lambda url: FakeResponse(),
+    )
+
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title",
+    )
+
+    assert result.observability is not None
+
+    metadata = result.observability
+
+    assert metadata.run_id
+    assert metadata.started_at
+    assert metadata.completed_at
+    assert metadata.duration_ms is not None
+    assert metadata.status == "success"
+
+    stage_names = [
+        stage.name
+        for stage in metadata.stages
+    ]
+
+    assert stage_names == [
+        "validation",
+        "planning",
+        "fetching",
+        "decoding",
+        "extraction",
+        "quality_validation",
+        "completed",
+    ]
+
+
+def test_pipeline_observability_records_stage_timings(
+    monkeypatch,
+):
+    class FakeResponse:
+        url = "https://example.com"
+        final_url = "https://example.com"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <article class="job">
+                <h2 class="title">Consultant</h2>
+            </article>
+        </html>
+        """
+
+    monkeypatch.setattr(
+        "backend.app.services.pipeline_orchestrator.fetch_url",
+        lambda url: FakeResponse(),
+    )
+
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title",
+    )
+
+    assert result.observability is not None
+
+    stages = {
+        stage.name: stage
+        for stage in result.observability.stages
+    }
+
+    for stage_name in (
+        "validation",
+        "planning",
+        "fetching",
+        "decoding",
+        "extraction",
+        "quality_validation",
+        "completed",
+    ):
+        assert stage_name in stages
+
+        stage = stages[stage_name]
+
+        assert stage.started_at
+        assert stage.completed_at
+        assert stage.duration_ms is not None
+        assert stage.duration_ms >= 0
