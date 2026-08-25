@@ -8,7 +8,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[1] / "backend"),
 )
 
-from app.services.browser_automation import BrowserAutomation
+from backend.app.services.browser_automation import BrowserAutomation
 
 
 @pytest.fixture

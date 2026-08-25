@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.services.extraction_engine import build_extraction_plan
-from app.services.extraction_executor import execute_extraction
+from backend.app.services.extraction_engine import build_extraction_plan
+from backend.app.services.extraction_executor import execute_extraction
 
 
 HTML = """
