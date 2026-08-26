@@ -24,6 +24,9 @@ from backend.app.services.pipeline_reliability import (
     PipelineReliabilityMetadata,
     PipelineReliabilityTracker,
 )
+from backend.app.services.pipeline_failure_classifier import (
+    classify_failure,
+)
 from backend.app.services.pipeline_validator import (
     PipelineValidationResult,
     validate_pipeline_input,
@@ -253,16 +256,15 @@ def run_extraction_pipeline(
     # 5. Execute extraction with reliability retries
     # ---------------------------------------------------------------
 
-        # ---------------------------------------------------------------
-    # 5. Execute extraction with reliability retries
-    # ---------------------------------------------------------------
-
     tracker.start_stage("extraction")
 
     try:
         records = []
 
         try:
+            # Normal successful execution does not create a
+            # reliability attempt. Reliability tracking begins
+            # only when a retry is required.
             result: ExtractionResult = execute_extraction(
                 html=html,
                 plan=plan,
@@ -272,9 +274,8 @@ def run_extraction_pipeline(
             records = result.records
 
         except Exception as first_exc:
-            # The first execution is the normal pipeline execution.
-            # Only create reliability attempt metadata when a retry
-            # is actually required.
+            # The first failed execution becomes reliability
+            # attempt #1 because recovery is now required.
             first_attempt = reliability_tracker.start_attempt()
 
             reliability_tracker.fail_attempt(
@@ -288,7 +289,7 @@ def run_extraction_pipeline(
                 if delay > 0:
                     time.sleep(delay)
 
-                attempt = reliability_tracker.start_attempt()
+                retry_attempt = reliability_tracker.start_attempt()
 
                 try:
                     result = execute_extraction(
@@ -300,7 +301,7 @@ def run_extraction_pipeline(
                     records = result.records
 
                     reliability_tracker.complete_attempt(
-                        attempt
+                        retry_attempt
                     )
 
                     reliability_tracker.complete(
@@ -309,18 +310,20 @@ def run_extraction_pipeline(
 
                     break
 
-                except Exception as exc:
+                except Exception as retry_exc:
                     reliability_tracker.fail_attempt(
-                        attempt,
-                        exc,
+                        retry_attempt,
+                        retry_exc,
                     )
 
                     if not reliability_tracker.can_retry():
-                        reliability_tracker.fail(exc)
+                        reliability_tracker.fail(
+                            retry_exc
+                        )
 
                         tracker.fail(
                             "extraction",
-                            exc,
+                            retry_exc,
                         )
 
                         raise
@@ -347,7 +350,7 @@ def run_extraction_pipeline(
                 failure_type="ExtractionRetryError",
             )
         raise
-    # ---------------------------------------------------------------
+
     # 6. Validate pipeline output
     # ---------------------------------------------------------------
 
@@ -416,10 +419,4 @@ def run_extraction_pipeline(
         observability=observability,
         reliability=reliability,
     )
-
-
-
-
-
-
 
