@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
@@ -23,6 +23,10 @@ class FailureCategory(str, Enum):
 class FailureClassification:
     """
     Structured classification of an exception.
+
+    The classification provides both retry policy information
+    and an explicit recovery recommendation for the reliability
+    subsystem.
     """
 
     category: FailureCategory
@@ -30,6 +34,8 @@ class FailureClassification:
     reason: str
     error_type: str
     status_code: int | None = None
+    recovery_action: str | None = None
+    recovery_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +44,8 @@ class FailureClassification:
             "reason": self.reason,
             "error_type": self.error_type,
             "status_code": self.status_code,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
         }
 
 
@@ -79,9 +87,9 @@ def classify_failure(
     Classify a pipeline exception as transient, permanent,
     or unknown.
 
-    The classifier deliberately uses conservative rules:
-    known transient failures are retryable, while known
-    permanent failures are not.
+    Known transient failures are retryable.
+    Known permanent failures are not retryable.
+    Unknown failures remain non-retryable.
     """
 
     error_type = error.__class__.__name__
@@ -100,6 +108,11 @@ def classify_failure(
                 ),
                 error_type=error_type,
                 status_code=status_code,
+                recovery_action="retry",
+                recovery_reason=(
+                    "Retry the operation because the HTTP "
+                    "status indicates a potentially temporary failure."
+                ),
             )
 
         if status_code in _PERMANENT_STATUS_CODES:
@@ -112,6 +125,11 @@ def classify_failure(
                 ),
                 error_type=error_type,
                 status_code=status_code,
+                recovery_action="abort",
+                recovery_reason=(
+                    "Do not retry because the HTTP status "
+                    "indicates a non-retryable request failure."
+                ),
             )
 
     transient_exception_names = {
@@ -130,6 +148,11 @@ def classify_failure(
             ),
             error_type=error_type,
             status_code=status_code,
+            recovery_action="retry",
+            recovery_reason=(
+                f"{error_type} may be temporary and the "
+                "operation should be retried."
+            ),
         )
 
     transient_terms = (
@@ -159,6 +182,31 @@ def classify_failure(
             ),
             error_type=error_type,
             status_code=status_code,
+            recovery_action="retry",
+            recovery_reason=(
+                "The error message indicates a temporary "
+                "or recoverable condition."
+            ),
+        )
+
+    # Generic runtime failures may represent temporary failures
+    # during extraction. Keep them retryable as a controlled
+    # compatibility policy.
+    if isinstance(error, RuntimeError):
+        return FailureClassification(
+            category=FailureCategory.TRANSIENT,
+            retryable=True,
+            reason=(
+                "RuntimeError may represent a temporary "
+                "execution failure and is eligible for controlled retry"
+            ),
+            error_type=error_type,
+            status_code=status_code,
+            recovery_action="retry",
+            recovery_reason=(
+                "RuntimeError may represent a temporary "
+                "execution failure and is eligible for controlled retry."
+            ),
         )
 
     return FailureClassification(
@@ -170,4 +218,8 @@ def classify_failure(
         ),
         error_type=error_type,
         status_code=status_code,
+        recovery_action="abort",
+        recovery_reason=(
+            "The failure is not explicitly classified as retryable."
+        ),
     )

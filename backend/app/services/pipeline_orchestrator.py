@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
@@ -42,19 +42,19 @@ class PipelineResult:
     Pipeline:
 
         URL
-          â†“
+          ↓
         Input validation
-          â†“
+          ↓
         Extraction plan
-          â†“
+          ↓
         HTTP fetch
-          â†“
+          ↓
         HTML decoding
-          â†“
+          ↓
         Structured extraction
-          â†“
+          ↓
         Output validation
-          â†“
+          ↓
         Validated pipeline result
     """
 
@@ -253,7 +253,7 @@ def run_extraction_pipeline(
         raise
 
     # ---------------------------------------------------------------
-    # 5. Execute extraction with reliability retries
+    # 5. Execute extraction with intelligent reliability retries
     # ---------------------------------------------------------------
 
     tracker.start_stage("extraction")
@@ -263,8 +263,7 @@ def run_extraction_pipeline(
 
         try:
             # Normal successful execution does not create a
-            # reliability attempt. Reliability tracking begins
-            # only when a retry is required.
+            # reliability attempt.
             result: ExtractionResult = execute_extraction(
                 html=html,
                 plan=plan,
@@ -274,13 +273,32 @@ def run_extraction_pipeline(
             records = result.records
 
         except Exception as first_exc:
+            classification = classify_failure(first_exc)
+
+            # Permanent and non-retryable failures must not trigger
+            # unnecessary extraction retries.
+            if not classification.retryable:
+                reliability_tracker.fail(
+                    first_exc,
+                    classification=classification,
+                )
+
+                tracker.fail(
+                    "extraction",
+                    first_exc,
+                    failure_type=classification.category,
+                )
+
+                raise
+
             # The first failed execution becomes reliability
-            # attempt #1 because recovery is now required.
+            # attempt #1 because recovery is required.
             first_attempt = reliability_tracker.start_attempt()
 
             reliability_tracker.fail_attempt(
                 first_attempt,
                 first_exc,
+                classification=classification,
             )
 
             while reliability_tracker.can_retry():
@@ -311,31 +329,56 @@ def run_extraction_pipeline(
                     break
 
                 except Exception as retry_exc:
+                    retry_classification = classify_failure(
+                        retry_exc
+                    )
+
                     reliability_tracker.fail_attempt(
                         retry_attempt,
                         retry_exc,
+                        classification=retry_classification,
                     )
 
-                    if not reliability_tracker.can_retry():
+                    # Stop immediately when the new failure is not
+                    # retryable.
+                    if not retry_classification.retryable:
                         reliability_tracker.fail(
-                            retry_exc
+                            retry_exc,
+                            classification=retry_classification,
                         )
 
                         tracker.fail(
                             "extraction",
                             retry_exc,
+                            failure_type=retry_classification.category,
+                        )
+
+                        raise
+
+                    if not reliability_tracker.can_retry():
+                        reliability_tracker.fail(
+                            retry_exc,
+                            classification=retry_classification,
+                        )
+
+                        tracker.fail(
+                            "extraction",
+                            retry_exc,
+                            failure_type=retry_classification.category,
                         )
 
                         raise
 
             else:
                 reliability_tracker.fail(
-                    first_exc
+                    first_exc,
+                    classification=classification,
                 )
 
                 tracker.fail(
                     "extraction",
                     first_exc,
+                    failure_type=classification.category,
                 )
 
                 raise
@@ -350,7 +393,6 @@ def run_extraction_pipeline(
                 failure_type="ExtractionRetryError",
             )
         raise
-
     # 6. Validate pipeline output
     # ---------------------------------------------------------------
 
@@ -419,4 +461,3 @@ def run_extraction_pipeline(
         observability=observability,
         reliability=reliability,
     )
-
