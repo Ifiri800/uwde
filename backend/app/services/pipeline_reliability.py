@@ -1,9 +1,161 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+
+@dataclass(frozen=True)
+class FailureClassification:
+    """
+    Describes whether a pipeline failure is transient and
+    whether the operation should be retried.
+    """
+
+    category: str
+    retryable: bool
+    recovery_action: str
+    recovery_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "category": self.category,
+            "retryable": self.retryable,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
+        }
+
+
+def classify_failure(
+    error: Exception | str,
+) -> FailureClassification:
+    """
+    Classify a pipeline failure into a recovery policy.
+
+    Known transient failures are retryable.
+    Known permanent failures are not retryable.
+
+    Generic exceptions remain retryable for backwards compatibility
+    with the existing extraction reliability behaviour.
+    """
+
+    error_type = (
+        error.__class__.__name__
+        if isinstance(error, Exception)
+        else "Exception"
+    )
+
+    message = str(error).lower()
+
+    status_code = getattr(
+        error,
+        "status_code",
+        None,
+    )
+
+    if status_code == 429:
+        return FailureClassification(
+            category="rate_limit",
+            retryable=True,
+            recovery_action="retry",
+            recovery_reason="The remote service requested rate limiting.",
+        )
+
+    if isinstance(status_code, int):
+        if 500 <= status_code <= 599:
+            return FailureClassification(
+                category="server_error",
+                retryable=True,
+                recovery_action="retry",
+                recovery_reason="The remote server returned a transient 5xx response.",
+            )
+
+        if 400 <= status_code <= 499:
+            return FailureClassification(
+                category="client_error",
+                retryable=False,
+                recovery_action="fail",
+                recovery_reason="The request returned a non-retryable 4xx response.",
+            )
+
+    timeout_types = {
+        "TimeoutError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ConnectionError",
+    }
+
+    if error_type in timeout_types:
+        return FailureClassification(
+            category="network_timeout",
+            retryable=True,
+            recovery_action="retry",
+            recovery_reason="The network operation may succeed on a subsequent attempt.",
+        )
+
+    if any(
+        token in message
+        for token in (
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
+            "temporary failure",
+            "temporarily unavailable",
+        )
+    ):
+        return FailureClassification(
+            category="network_transient",
+            retryable=True,
+            recovery_action="retry",
+            recovery_reason="The failure appears to be transient.",
+        )
+
+    if error_type in {
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "AttributeError",
+        "AssertionError",
+    }:
+        return FailureClassification(
+            category="programming_error",
+            retryable=False,
+            recovery_action="fail",
+            recovery_reason="The failure indicates invalid application state or programming logic.",
+        )
+
+    if "invalid url" in message:
+        return FailureClassification(
+            category="invalid_url",
+            retryable=False,
+            recovery_action="fail",
+            recovery_reason="The supplied URL is invalid and retrying will not correct it.",
+        )
+
+    if "validation" in message:
+        return FailureClassification(
+            category="validation_error",
+            retryable=False,
+            recovery_action="fail",
+            recovery_reason="The failure is caused by invalid pipeline data.",
+        )
+
+    if "parse" in message:
+        return FailureClassification(
+            category="parsing_error",
+            retryable=False,
+            recovery_action="fail",
+            recovery_reason="The response could not be parsed successfully.",
+        )
+
+    return FailureClassification(
+        category="transient_unknown",
+        retryable=True,
+        recovery_action="retry",
+        recovery_reason="The failure type is unknown and remains eligible for controlled retry.",
+    )
 
 
 @dataclass
@@ -79,6 +231,11 @@ class ReliabilityAttempt:
     error: str | None = None
     error_type: str | None = None
 
+    failure_category: str | None = None
+    retryable: bool | None = None
+    recovery_action: str | None = None
+    recovery_reason: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "attempt": self.attempt,
@@ -88,6 +245,10 @@ class ReliabilityAttempt:
             "status": self.status,
             "error": self.error,
             "error_type": self.error_type,
+            "failure_category": self.failure_category,
+            "retryable": self.retryable,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
         }
 
 
@@ -113,28 +274,16 @@ class PipelineReliabilityMetadata:
     final_error: str | None = None
     final_error_type: str | None = None
 
+    failure_category: str | None = None
+    retryable: bool | None = None
+    recovery_action: str | None = None
+    recovery_reason: str | None = None
+
     @property
     def attempt_count(self) -> int:
-        """
-        Return the total number of attempts.
-        """
-
         return len(self.attempts)
 
     def refresh_retry_count(self) -> None:
-        """
-        Keep retry_count synchronized with attempt_count.
-
-        The first attempt is the original execution.
-        Every additional attempt is a retry.
-
-        Examples:
-
-            1 attempt -> 0 retries
-            2 attempts -> 1 retry
-            3 attempts -> 2 retries
-        """
-
         self.retry_count = max(
             0,
             self.attempt_count - 1,
@@ -154,6 +303,10 @@ class PipelineReliabilityMetadata:
             "recovered": self.recovered,
             "final_error": self.final_error,
             "final_error_type": self.final_error_type,
+            "failure_category": self.failure_category,
+            "retryable": self.retryable,
+            "recovery_action": self.recovery_action,
+            "recovery_reason": self.recovery_reason,
             "attempts": [
                 attempt.to_dict()
                 for attempt in self.attempts
@@ -165,10 +318,6 @@ class PipelineReliabilityTracker:
     """
     Tracks retry and recovery behaviour for one
     pipeline operation.
-
-    This tracker records reliability information.
-    The orchestrator remains responsible for deciding
-    whether an operation should actually be retried.
     """
 
     def __init__(
@@ -186,10 +335,6 @@ class PipelineReliabilityTracker:
         )
 
     def start_attempt(self) -> ReliabilityAttempt:
-        """
-        Start and register a new execution attempt.
-        """
-
         if self.metadata.status in {
             "completed",
             "success",
@@ -216,7 +361,6 @@ class PipelineReliabilityTracker:
         )
 
         self.metadata.attempts.append(attempt)
-
         self.metadata.refresh_retry_count()
 
         return attempt
@@ -225,10 +369,6 @@ class PipelineReliabilityTracker:
         self,
         attempt: ReliabilityAttempt,
     ) -> None:
-        """
-        Mark an attempt as successful.
-        """
-
         now = datetime.now(timezone.utc)
 
         attempt.status = "success"
@@ -248,11 +388,8 @@ class PipelineReliabilityTracker:
         self,
         attempt: ReliabilityAttempt,
         error: Exception | str,
+        classification: FailureClassification | None = None,
     ) -> None:
-        """
-        Mark an attempt as failed.
-        """
-
         now = datetime.now(timezone.utc)
 
         attempt.status = "failed"
@@ -265,6 +402,19 @@ class PipelineReliabilityTracker:
             )
         else:
             attempt.error_type = "Exception"
+
+        if classification is None:
+            classification = classify_failure(error)
+
+        attempt.failure_category = classification.category
+        attempt.retryable = classification.retryable
+        attempt.recovery_action = classification.recovery_action
+        attempt.recovery_reason = classification.recovery_reason
+
+        self.metadata.failure_category = classification.category
+        self.metadata.retryable = classification.retryable
+        self.metadata.recovery_action = classification.recovery_action
+        self.metadata.recovery_reason = classification.recovery_reason
 
         started = datetime.fromisoformat(
             attempt.started_at
@@ -280,14 +430,6 @@ class PipelineReliabilityTracker:
         self,
         recovered: bool = False,
     ) -> PipelineReliabilityMetadata:
-        """
-        Mark the operation as successfully completed.
-
-        If the operation required more than one attempt,
-        it is considered a recovered operation when
-        recovered=True.
-        """
-
         now = datetime.now(timezone.utc)
 
         self.metadata.completed_at = now.isoformat()
@@ -306,11 +448,8 @@ class PipelineReliabilityTracker:
     def fail(
         self,
         error: Exception | str,
+        classification: FailureClassification | None = None,
     ) -> PipelineReliabilityMetadata:
-        """
-        Mark the operation as permanently failed.
-        """
-
         now = datetime.now(timezone.utc)
 
         self.metadata.completed_at = now.isoformat()
@@ -329,25 +468,25 @@ class PipelineReliabilityTracker:
         else:
             self.metadata.final_error_type = "Exception"
 
+        if classification is None:
+            classification = classify_failure(error)
+
+        self.metadata.failure_category = classification.category
+        self.metadata.retryable = classification.retryable
+        self.metadata.recovery_action = classification.recovery_action
+        self.metadata.recovery_reason = classification.recovery_reason
+
         self.metadata.refresh_retry_count()
 
         return self.metadata
 
     def can_retry(self) -> bool:
-        """
-        Return whether another attempt is permitted.
-        """
-
         return (
             len(self.metadata.attempts)
             < self.policy.max_attempts
         )
 
     def next_retry_delay(self) -> float:
-        """
-        Calculate the delay before the next attempt.
-        """
-
         next_attempt = (
             len(self.metadata.attempts) + 1
         )
@@ -360,8 +499,4 @@ class PipelineReliabilityTracker:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """
-        Return serializable reliability metadata.
-        """
-
         return self.metadata.to_dict()
