@@ -7,8 +7,11 @@ import pytest
 from backend.app.services.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerConfig,
+    CircuitBreakerRegistry,
     CircuitOpenError,
     CircuitState,
+    get_circuit_breaker,
+    get_circuit_registry,
 )
 
 
@@ -245,3 +248,112 @@ def test_empty_name_is_rejected():
         match="name must not be empty",
     ):
         CircuitBreaker("")
+
+
+def test_registry_returns_same_circuit_for_same_name():
+    registry = CircuitBreakerRegistry()
+
+    first = registry.get("example.com")
+    second = registry.get("example.com")
+
+    assert first is second
+
+
+def test_registry_normalizes_circuit_name():
+    registry = CircuitBreakerRegistry()
+
+    first = registry.get(" example.com ")
+    second = registry.get("example.com")
+
+    assert first is second
+    assert first.name == "example.com"
+
+
+def test_registry_creates_independent_circuits():
+    registry = CircuitBreakerRegistry(
+        CircuitBreakerConfig(
+            failure_threshold=1,
+        )
+    )
+
+    first = registry.get("example.com")
+    second = registry.get("other.example.com")
+
+    first.record_failure()
+
+    assert first.state == CircuitState.OPEN
+    assert second.state == CircuitState.CLOSED
+
+
+def test_registry_snapshot_contains_all_circuits():
+    registry = CircuitBreakerRegistry()
+
+    registry.get("example.com")
+    registry.get("other.example.com")
+
+    snapshot = registry.snapshot()
+
+    assert set(snapshot) == {
+        "example.com",
+        "other.example.com",
+    }
+
+    assert snapshot["example.com"]["name"] == "example.com"
+    assert snapshot["other.example.com"]["name"] == (
+        "other.example.com"
+    )
+
+
+def test_registry_reset_resets_named_circuit():
+    registry = CircuitBreakerRegistry(
+        CircuitBreakerConfig(
+            failure_threshold=1,
+        )
+    )
+
+    circuit = registry.get("example.com")
+
+    circuit.record_failure()
+
+    assert circuit.state == CircuitState.OPEN
+
+    registry.reset("example.com")
+
+    assert circuit.state == CircuitState.CLOSED
+
+
+def test_registry_clear_removes_all_circuits():
+    registry = CircuitBreakerRegistry()
+
+    registry.get("example.com")
+    registry.get("other.example.com")
+
+    assert len(registry.snapshot()) == 2
+
+    registry.clear()
+
+    assert registry.snapshot() == {}
+
+
+def test_registry_rejects_empty_name():
+    registry = CircuitBreakerRegistry()
+
+    with pytest.raises(
+        ValueError,
+        match="circuit name must not be empty",
+    ):
+        registry.get("   ")
+
+
+def test_global_registry_returns_persistent_circuit():
+    registry = get_circuit_registry()
+
+    registry.clear()
+
+    first = get_circuit_breaker("example.com")
+    second = get_circuit_breaker("example.com")
+
+    assert first is second
+    assert first.name == "example.com"
+
+    registry.clear()

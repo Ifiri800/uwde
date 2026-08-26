@@ -11,15 +11,13 @@ T = TypeVar("T")
 
 
 class CircuitState(str, Enum):
-    """Possible states of a circuit breaker."""
-
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
 
 
 class CircuitOpenError(RuntimeError):
-    """Raised when execution is blocked by an open circuit."""
+    """Raised when a circuit blocks an operation."""
 
     def __init__(
         self,
@@ -37,8 +35,6 @@ class CircuitOpenError(RuntimeError):
 
 @dataclass(frozen=True)
 class CircuitBreakerConfig:
-    """Configuration for a circuit breaker."""
-
     failure_threshold: int = 5
     recovery_timeout_seconds: float = 30.0
     success_threshold: int = 1
@@ -62,8 +58,6 @@ class CircuitBreakerConfig:
 
 @dataclass
 class CircuitBreakerSnapshot:
-    """Serializable circuit breaker state."""
-
     name: str
     state: CircuitState
     consecutive_failures: int
@@ -88,17 +82,16 @@ class CircuitBreakerSnapshot:
 
 class CircuitBreaker:
     """
-    Thread-safe circuit breaker for protecting unreliable operations.
+    Thread-safe circuit breaker.
 
     CLOSED:
-        Operations execute normally.
+        Normal execution.
 
     OPEN:
-        Operations are blocked until the recovery timeout expires.
+        Execution is blocked until the recovery timeout.
 
     HALF_OPEN:
-        A limited probe is allowed to determine whether the
-        protected operation has recovered.
+        Exactly one probe is permitted at a time.
     """
 
     def __init__(
@@ -128,22 +121,9 @@ class CircuitBreaker:
     def state(self) -> CircuitState:
         with self._lock:
             self._refresh_state()
-
             return self._state
 
     def allow_request(self) -> bool:
-        """
-        Determine whether a protected operation may execute.
-
-        CLOSED:
-            allow.
-
-        OPEN:
-            block until recovery timeout has elapsed.
-
-        HALF_OPEN:
-            allow exactly one probe at a time.
-        """
         with self._lock:
             self._refresh_state()
 
@@ -158,13 +138,11 @@ class CircuitBreaker:
                     return False
 
                 self._half_open_probe_in_flight = True
-
                 return True
 
             return False
 
     def record_success(self) -> None:
-        """Record a successful protected operation."""
         with self._lock:
             self._total_successes += 1
 
@@ -184,7 +162,6 @@ class CircuitBreaker:
             self._consecutive_failures = 0
 
     def record_failure(self) -> None:
-        """Record a failed protected operation."""
         with self._lock:
             self._total_failures += 1
             self._last_failure_at = monotonic()
@@ -208,11 +185,6 @@ class CircuitBreaker:
         self,
         operation: Callable[[], T],
     ) -> T:
-        """
-        Execute an operation through the circuit breaker.
-
-        CircuitOpenError is raised when execution is blocked.
-        """
         if not self.allow_request():
             raise CircuitOpenError(
                 self.name,
@@ -229,12 +201,10 @@ class CircuitBreaker:
             return result
 
     def reset(self) -> None:
-        """Manually reset the circuit to CLOSED."""
         with self._lock:
             self._close()
 
     def snapshot(self) -> CircuitBreakerSnapshot:
-        """Return a serializable snapshot of current state."""
         with self._lock:
             self._refresh_state()
 
@@ -254,7 +224,6 @@ class CircuitBreaker:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the current state as a dictionary."""
         return self.snapshot().to_dict()
 
     def _refresh_state(self) -> None:
@@ -286,3 +255,82 @@ class CircuitBreaker:
         self._consecutive_failures = 0
         self._consecutive_successes = 0
         self._half_open_probe_in_flight = False
+
+
+class CircuitBreakerRegistry:
+    """
+    Thread-safe registry of persistent circuit breakers.
+
+    A circuit is keyed by a stable target name, allowing failures
+    from separate pipeline executions to contribute to the same
+    circuit.
+    """
+
+    def __init__(
+        self,
+        config: CircuitBreakerConfig | None = None,
+    ) -> None:
+        self.config = config or CircuitBreakerConfig()
+        self._circuits: dict[str, CircuitBreaker] = {}
+        self._lock = Lock()
+
+    def get(self, name: str) -> CircuitBreaker:
+        normalized_name = name.strip()
+
+        if not normalized_name:
+            raise ValueError(
+                "circuit name must not be empty"
+            )
+
+        with self._lock:
+            circuit = self._circuits.get(
+                normalized_name
+            )
+
+            if circuit is None:
+                circuit = CircuitBreaker(
+                    normalized_name,
+                    self.config,
+                )
+                self._circuits[normalized_name] = circuit
+
+            return circuit
+
+    def reset(self, name: str) -> None:
+        with self._lock:
+            circuit = self._circuits.get(
+                name.strip()
+            )
+
+            if circuit is not None:
+                circuit.reset()
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return {
+                name: circuit.to_dict()
+                for name, circuit in self._circuits.items()
+            }
+
+    def clear(self) -> None:
+        with self._lock:
+            self._circuits.clear()
+
+
+_GLOBAL_CIRCUIT_REGISTRY = CircuitBreakerRegistry()
+
+
+def get_circuit_breaker(
+    name: str,
+) -> CircuitBreaker:
+    """
+    Return the persistent process-level circuit for a target.
+    """
+    return _GLOBAL_CIRCUIT_REGISTRY.get(name)
+
+
+def get_circuit_registry() -> CircuitBreakerRegistry:
+    """
+    Return the process-level circuit registry.
+    """
+    return _GLOBAL_CIRCUIT_REGISTRY
