@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 from backend.app.services.extraction_engine import (
@@ -19,6 +20,10 @@ from backend.app.services.pipeline_observability import (
     PipelineExecutionMetadata,
     PipelineExecutionTracker,
 )
+from backend.app.services.pipeline_reliability import (
+    PipelineReliabilityMetadata,
+    PipelineReliabilityTracker,
+)
 from backend.app.services.pipeline_validator import (
     PipelineValidationResult,
     validate_pipeline_input,
@@ -34,19 +39,19 @@ class PipelineResult:
     Pipeline:
 
         URL
-          ↓
+          â†“
         Input validation
-          ↓
+          â†“
         Extraction plan
-          ↓
+          â†“
         HTTP fetch
-          ↓
+          â†“
         HTML decoding
-          ↓
+          â†“
         Structured extraction
-          ↓
+          â†“
         Output validation
-          ↓
+          â†“
         Validated pipeline result
     """
 
@@ -65,6 +70,7 @@ class PipelineResult:
     )
     validation: PipelineValidationResult | None = None
     observability: PipelineExecutionMetadata | None = None
+    reliability: PipelineReliabilityMetadata | None = None
 
     @property
     def record_count(self) -> int:
@@ -80,6 +86,12 @@ class PipelineResult:
         observability_data = (
             self.observability.to_dict()
             if self.observability
+            else None
+        )
+
+        reliability_data = (
+            self.reliability.to_dict()
+            if self.reliability
             else None
         )
 
@@ -100,6 +112,7 @@ class PipelineResult:
             "errors": self.errors,
             "validation": validation_data,
             "observability": observability_data,
+            "reliability": reliability_data,
         }
 
 
@@ -109,10 +122,18 @@ def run_extraction_pipeline(
 ) -> PipelineResult:
     """
     Execute the complete UWDE extraction pipeline
-    with execution observability.
+    with execution observability and reliability tracking.
+
+    Reliability tracking is initialized here so that the
+    orchestrator can record execution attempts and outcomes.
+
+    Actual retry execution and retry classification are
+    intentionally handled in the subsequent reliability
+    integration steps.
     """
 
     tracker = PipelineExecutionTracker()
+    reliability_tracker = PipelineReliabilityTracker()
 
     normalized_url = str(url).strip()
     normalized_instruction = str(
@@ -229,29 +250,103 @@ def run_extraction_pipeline(
         raise
 
     # ---------------------------------------------------------------
-    # 5. Execute extraction
+    # 5. Execute extraction with reliability retries
+    # ---------------------------------------------------------------
+
+        # ---------------------------------------------------------------
+    # 5. Execute extraction with reliability retries
     # ---------------------------------------------------------------
 
     tracker.start_stage("extraction")
 
     try:
-        result: ExtractionResult = execute_extraction(
-            html=html,
-            plan=plan,
-            base_url=fetched.final_url,
-        )
+        records = []
 
-        records = result.records
+        try:
+            result: ExtractionResult = execute_extraction(
+                html=html,
+                plan=plan,
+                base_url=fetched.final_url,
+            )
+
+            records = result.records
+
+        except Exception as first_exc:
+            # The first execution is the normal pipeline execution.
+            # Only create reliability attempt metadata when a retry
+            # is actually required.
+            first_attempt = reliability_tracker.start_attempt()
+
+            reliability_tracker.fail_attempt(
+                first_attempt,
+                first_exc,
+            )
+
+            while reliability_tracker.can_retry():
+                delay = reliability_tracker.next_retry_delay()
+
+                if delay > 0:
+                    time.sleep(delay)
+
+                attempt = reliability_tracker.start_attempt()
+
+                try:
+                    result = execute_extraction(
+                        html=html,
+                        plan=plan,
+                        base_url=fetched.final_url,
+                    )
+
+                    records = result.records
+
+                    reliability_tracker.complete_attempt(
+                        attempt
+                    )
+
+                    reliability_tracker.complete(
+                        recovered=True
+                    )
+
+                    break
+
+                except Exception as exc:
+                    reliability_tracker.fail_attempt(
+                        attempt,
+                        exc,
+                    )
+
+                    if not reliability_tracker.can_retry():
+                        reliability_tracker.fail(exc)
+
+                        tracker.fail(
+                            "extraction",
+                            exc,
+                        )
+
+                        raise
+
+            else:
+                reliability_tracker.fail(
+                    first_exc
+                )
+
+                tracker.fail(
+                    "extraction",
+                    first_exc,
+                )
+
+                raise
 
         tracker.complete_stage("extraction")
 
-    except Exception as exc:
-        tracker.fail(
-            "extraction",
-            exc,
-        )
+    except Exception:
+        if tracker.metadata.status != "failed":
+            tracker.fail(
+                "extraction",
+                "Extraction failed after retry attempts",
+                failure_type="ExtractionRetryError",
+            )
         raise
-
     # ---------------------------------------------------------------
     # 6. Validate pipeline output
     # ---------------------------------------------------------------
@@ -296,6 +391,13 @@ def run_extraction_pipeline(
         status=status
     )
 
+    if reliability_tracker.metadata.status == "running":
+        reliability = reliability_tracker.complete(
+            recovered=False
+        )
+    else:
+        reliability = reliability_tracker.metadata
+
     # ---------------------------------------------------------------
     # 8. Return validated pipeline result
     # ---------------------------------------------------------------
@@ -312,4 +414,11 @@ def run_extraction_pipeline(
         errors=errors,
         validation=validation,
         observability=observability,
+        reliability=reliability,
     )
+
+
+
+
+
+
