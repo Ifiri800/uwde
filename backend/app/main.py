@@ -4,25 +4,27 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 
+from backend.app.config import get_settings
 from backend.app.services.website_analyzer import analyze_website
-from backend.app.services.http_fetcher import FetchError, fetch_url
-from backend.app.services.extraction_engine import build_extraction_plan
-from backend.app.services.extraction_executor import execute_extraction
+from backend.app.services.http_fetcher import FetchError
+from backend.app.services.pipeline_orchestrator import (
+    run_extraction_pipeline,
+)
+
+
+settings = get_settings()
 
 
 app = FastAPI(
-    title="Universal Web Data Extractor",
+    title=settings.app_name,
     description="API for extracting structured data from websites.",
-    version="0.1.0",
+    version=settings.app_version,
 )
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -44,7 +46,18 @@ async def health_check():
     return {
         "status": "ok",
         "service": "uwde-api",
-        "version": "0.1.0",
+        "version": settings.app_version,
+        "environment": settings.environment,
+    }
+
+
+@app.get("/ready")
+async def readiness_check():
+    return {
+        "status": "ready",
+        "service": "uwde-api",
+        "version": settings.app_version,
+        "environment": settings.environment,
     }
 
 
@@ -99,15 +112,15 @@ async def extract_website_endpoint(request: ExtractRequest):
         )
 
     try:
-        plan = build_extraction_plan(instruction)
+        result = run_extraction_pipeline(
+            url=str(request.url),
+            instruction=instruction,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
             detail=str(exc),
         ) from exc
-
-    try:
-        fetched = fetch_url(str(request.url))
     except FetchError as exc:
         raise HTTPException(
             status_code=400,
@@ -116,31 +129,7 @@ async def extract_website_endpoint(request: ExtractRequest):
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Website fetch failed: {exc}",
+            detail=f"Extraction pipeline failed: {exc}",
         ) from exc
 
-    try:
-        html = fetched.body.decode("utf-8", errors="replace")
-
-        result = execute_extraction(
-            html=html,
-            plan=plan,
-            base_url=fetched.final_url,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Extraction failed: {exc}",
-        ) from exc
-
-    return {
-        "status": "success",
-        "url": fetched.url,
-        "final_url": fetched.final_url,
-        "status_code": fetched.status_code,
-        "content_type": fetched.content_type,
-        "instruction": instruction,
-        "plan": plan.to_dict(),
-        "records": result.records,
-        "record_count": len(result.records),
-    }
+    return result.to_dict()

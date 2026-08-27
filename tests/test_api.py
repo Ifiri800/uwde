@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
+from backend.app.services.pipeline_orchestrator import PipelineResult
 
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -80,31 +81,32 @@ def test_analyze_accepts_valid_request(monkeypatch):
     assert data["instruction"] == "Extract the page title"
     assert data["links_count"] == 1
 
-def test_extract_returns_structured_records(monkeypatch):
-    class FakeFetchResult:
-        url = "https://example.com"
-        final_url = "https://example.com/"
-        status_code = 200
-        content_type = "text/html"
-        body = b"""
-        <html>
-            <body>
-                <article>
-                    <h2>Example Job</h2>
-                    <div class="company">Example Company</div>
-                    <div class="location">Lagos</div>
-                </article>
-            </body>
-        </html>
-        """
 
-    def fake_fetch(url):
+def test_extract_returns_structured_records(monkeypatch):
+    fake_result = PipelineResult(
+        status="success",
+        url="https://example.com/",
+        final_url="https://example.com/",
+        status_code=200,
+        content_type="text/html",
+        instruction="Extract title, company and location",
+        records=[
+            {
+                "title": "Example Job",
+                "company": "Example Company",
+                "location": "Lagos",
+            }
+        ],
+    )
+
+    def fake_pipeline(url, instruction):
         assert url == "https://example.com/"
-        return FakeFetchResult()
+        assert instruction == "Extract title, company and location"
+        return fake_result
 
     monkeypatch.setattr(
-        "backend.app.main.fetch_url",
-        fake_fetch,
+        "backend.app.main.run_extraction_pipeline",
+        fake_pipeline,
     )
 
     response = client.post(
@@ -121,4 +123,7 @@ def test_extract_returns_structured_records(monkeypatch):
 
     assert data["status"] == "success"
     assert "records" in data
-    assert len(data["records"]) == 1    
+    assert len(data["records"]) == 1
+    assert data["records"][0]["title"] == "Example Job"
+    assert data["records"][0]["company"] == "Example Company"
+    assert data["records"][0]["location"] == "Lagos"
