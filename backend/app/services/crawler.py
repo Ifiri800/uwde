@@ -42,7 +42,6 @@ def _get_records(extraction_result: Any) -> list[dict[str, Any]]:
     if extraction_result is None:
         return []
 
-    # Normal UWDE ExtractionResult.
     records = getattr(
         extraction_result,
         "records",
@@ -59,7 +58,6 @@ def _get_records(extraction_result: Any) -> list[dict[str, Any]]:
 
         return []
 
-    # Dictionary result.
     if isinstance(extraction_result, dict):
         records = extraction_result.get(
             "records",
@@ -75,7 +73,6 @@ def _get_records(extraction_result: Any) -> list[dict[str, Any]]:
 
         return []
 
-    # Direct list result.
     if isinstance(extraction_result, list):
         return [
             record
@@ -92,12 +89,6 @@ def _find_next_url(
 ) -> str | None:
     """
     Find the next page URL.
-
-    Supported patterns include:
-
-        <a rel="next" href="...">
-
-    and common next-page selectors/text.
     """
 
     if not html:
@@ -108,10 +99,7 @@ def _find_next_url(
         "html.parser",
     )
 
-    # ---------------------------------------------------------------
     # rel="next"
-    # ---------------------------------------------------------------
-
     for link in soup.find_all(
         "a",
         href=True,
@@ -134,10 +122,7 @@ def _find_next_url(
                 str(link.get("href")),
             )
 
-    # ---------------------------------------------------------------
     # Common selectors
-    # ---------------------------------------------------------------
-
     selectors = [
         "a.next",
         "a.next-page",
@@ -163,18 +148,15 @@ def _find_next_url(
                 str(href),
             )
 
-    # ---------------------------------------------------------------
     # Common next-page text
-    # ---------------------------------------------------------------
-
     next_texts = {
         "next",
         "next page",
         "older",
         "older posts",
         "›",
-        "»",
-        "→",
+        "next",
+        "?",
     }
 
     for link in soup.find_all(
@@ -195,6 +177,57 @@ def _find_next_url(
     return None
 
 
+def _is_retryable_fetch_error(exc: Exception) -> bool:
+    """
+    Determine whether a fetch exception is transient.
+
+    Retryable:
+    - TimeoutError
+    - ConnectionError
+
+    Permanent/unclassified errors are not retried.
+    """
+
+    return isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+        ),
+    )
+
+
+def _fetch_with_retry(
+    fetch_fn: Callable[..., Any],
+    url: str,
+    max_retries: int = 2,
+) -> tuple[bool, Any, Exception | None]:
+    """
+    Fetch a URL with bounded retries.
+
+    max_retries means retries AFTER the initial request.
+
+    Therefore:
+        max_retries=2
+        -> maximum 3 total attempts
+    """
+
+    attempts = 0
+
+    while True:
+        attempts += 1
+
+        try:
+            return True, fetch_fn(url), None
+
+        except Exception as exc:
+            if not _is_retryable_fetch_error(exc):
+                return False, None, exc
+
+            if attempts > max_retries:
+                return False, None, exc
+
+
 def crawl(
     start_url: str,
     plan: ExtractionPlan,
@@ -202,12 +235,17 @@ def crawl(
     execute_fn: Callable[..., Any],
     config: PaginationConfig | None = None,
     rate_limit_seconds: float | None = None,
+    max_retries: int = 2,
 ) -> CrawlResult:
     """
     Crawl pages and extract records.
 
-    The function intentionally accepts injected fetch and extraction
-    functions so that the crawler can be tested independently.
+    Reliability guarantees:
+    - transient fetch errors are retried
+    - permanent fetch errors are not retried
+    - retry exhaustion does not crash the crawl
+    - extraction errors are isolated
+    - page and record limits are preserved
     """
 
     # ---------------------------------------------------------------
@@ -217,6 +255,15 @@ def crawl(
     if not start_url:
         raise ValueError(
             "start_url must not be empty"
+        )
+
+    # ---------------------------------------------------------------
+    # Validate retry configuration
+    # ---------------------------------------------------------------
+
+    if max_retries < 0:
+        raise ValueError(
+            "max_retries must not be negative"
         )
 
     # ---------------------------------------------------------------
@@ -266,8 +313,7 @@ def crawl(
             "max_records must be greater than zero"
         )
 
-    # If no explicit rate limit was supplied, use the config value
-    # when available.
+    # If no explicit rate limit was supplied, use the config value.
     if rate_limit_seconds is None:
         rate_limit_seconds = getattr(
             config,
@@ -328,20 +374,27 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Fetch current page
+        # Register page BEFORE fetching.
+        #
+        # This preserves crawler state even when fetch fails.
         # -----------------------------------------------------------
 
-        visited_urls.add(
-            current_url
+        visited_urls.add(current_url)
+        urls_crawled.append(current_url)
+
+        # -----------------------------------------------------------
+        # Fetch with bounded retry policy
+        # -----------------------------------------------------------
+
+        fetch_success, html, fetch_error = _fetch_with_retry(
+            fetch_fn,
+            current_url,
+            max_retries=max_retries,
         )
 
-        urls_crawled.append(
-            current_url
-        )
-
-        html = fetch_fn(
-            current_url
-        )
+        if not fetch_success:
+            stopped_reason = "fetch_error"
+            break
 
         if html is None:
             stopped_reason = "fetch_error"
@@ -349,11 +402,6 @@ def crawl(
 
         # -----------------------------------------------------------
         # Normalize fetch result.
-        #
-        # Normal test fetcher returns a string.
-        #
-        # Production fetchers may return an object with .html or
-        # .text.
         # -----------------------------------------------------------
 
         if not isinstance(
@@ -378,19 +426,19 @@ def crawl(
         # -----------------------------------------------------------
         # Execute extraction.
         #
-        # IMPORTANT:
-        # Your test fake_execute requires:
-        #
-        #     execute_fn(html, plan, url)
-        #
-        # Therefore the current URL is always supplied.
+        # Extraction failures must not escape the crawler.
         # -----------------------------------------------------------
 
-        extraction_result = execute_fn(
-            html,
-            plan,
-            current_url,
-        )
+        try:
+            extraction_result = execute_fn(
+                html,
+                plan,
+                current_url,
+            )
+
+        except Exception:
+            stopped_reason = "extraction_error"
+            break
 
         page_records = _get_records(
             extraction_result
@@ -431,9 +479,7 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Determine pagination strategy.
-        #
-        # The current UWDE crawler tests use NEXT_LINK.
+        # Pagination strategy.
         # -----------------------------------------------------------
 
         strategy = getattr(
@@ -443,9 +489,6 @@ def crawl(
         )
 
         if strategy != PaginationStrategy.NEXT_LINK:
-            # For now, safely fall back to next-link detection.
-            # Other pagination strategies are handled by the
-            # pagination subsystem.
             pass
 
         next_url = _find_next_url(
@@ -471,18 +514,9 @@ def crawl(
 
         current_url = next_url
 
-    # ---------------------------------------------------------------
-    # Apply rate limiting only between page requests.
-    #
-    # The test suite does not require sleeping, so production code
-    # can add request throttling around the fetch layer.
-    # ---------------------------------------------------------------
-
     return CrawlResult(
         records=records,
-        pages_crawled=len(
-            urls_crawled
-        ),
+        pages_crawled=len(urls_crawled),
         urls_crawled=urls_crawled,
         stopped_reason=stopped_reason,
     )
@@ -492,3 +526,5 @@ __all__ = [
     "CrawlResult",
     "crawl",
 ]
+
+
