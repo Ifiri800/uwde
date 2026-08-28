@@ -167,3 +167,28 @@ def test_market_observation_types_are_defined():
         MarketObservationType.MARKET_EXPANSION.value
         == "market_expansion"
     )
+
+def test_market_observation_normalizes_string_type():
+    observation = MarketObservation(
+        observation_id="obs-1",
+        market_id="market-1",
+        observation_type="price_change",
+        value={"previous": 100, "current": 125},
+        source_url="https://example.com",
+    )
+
+    assert (
+        observation.observation_type
+        is MarketObservationType.PRICE_CHANGE
+    )
+
+
+def test_market_observation_rejects_invalid_type():
+    with pytest.raises(ValueError):
+        MarketObservation(
+            observation_id="obs-1",
+            market_id="market-1",
+            observation_type="invalid_observation",
+            value="Something happened",
+            source_url="https://example.com",
+        )

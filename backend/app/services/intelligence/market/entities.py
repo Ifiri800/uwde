@@ -1,7 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from .observations import MarketObservationType
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,7 @@ class MarketSegment:
 class MarketObservation:
     observation_id: str
     market_id: str
-    observation_type: str
+    observation_type: MarketObservationType | str
     value: object
     source_url: str
     observed_at: datetime = field(
@@ -81,8 +83,21 @@ class MarketObservation:
         if not self.market_id.strip():
             raise ValueError("market_id is required")
 
-        if not self.observation_type.strip():
-            raise ValueError("observation_type is required")
+        try:
+            normalized_type = MarketObservationType(
+                self.observation_type
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "observation_type must be a valid "
+                "MarketObservationType"
+            ) from exc
+
+        object.__setattr__(
+            self,
+            "observation_type",
+            normalized_type,
+        )
 
         if not self.source_url.strip():
             raise ValueError("source_url is required")
@@ -97,12 +112,11 @@ class MarketObservation:
                 "observed_at must be timezone-aware"
             )
 
-
     def to_dict(self) -> dict:
         return {
             "observation_id": self.observation_id,
             "market_id": self.market_id,
-            "observation_type": self.observation_type,
+            "observation_type": self.observation_type.value,
             "value": self.value,
             "source_url": self.source_url,
             "observed_at": self.observed_at.isoformat(),
