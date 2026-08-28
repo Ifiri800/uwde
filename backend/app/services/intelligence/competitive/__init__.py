@@ -71,3 +71,12 @@ __all__ = [
     "CompetitiveSynthesisEngine",
     "synthesize_competitive_intelligence",
 ]
+from .threats import (
+    ThreatLevel,
+    ThreatDimension,
+    CompetitiveThreatAssessment,
+    CompetitiveThreatResult,
+    CompetitiveThreatEngine,
+    assess_competitive_threat,
+    assess_competitive_threats,
+)
