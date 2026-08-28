@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from backend.app.services.intelligence.b2b.lead_signals import (
+from backend.app.services.intelligence.leads.signals import (
     LeadSignal,
 )
 

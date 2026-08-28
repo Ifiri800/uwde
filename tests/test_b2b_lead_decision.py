@@ -1,9 +1,9 @@
-﻿from backend.app.services.intelligence.b2b.lead_decision import (
+from backend.app.services.intelligence.leads.decision import (
     LeadDecision,
     decide_lead,
 )
 
-from backend.app.services.intelligence.b2b.lead_signals import (
+from backend.app.services.intelligence.leads.signals import (
     LeadSignal,
     LeadSignalType,
 )
