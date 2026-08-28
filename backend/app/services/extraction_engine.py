@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
@@ -26,14 +26,7 @@ class ExtractionPlan:
         }
 
 
-# ---------------------------------------------------------------------------
-# Canonical field aliases
-# ---------------------------------------------------------------------------
-
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    # -----------------------------------------------------------------------
-    # General website fields
-    # -----------------------------------------------------------------------
     "title": (
         "title",
         "page title",
@@ -53,6 +46,8 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "paragraphs": (
         "paragraph",
         "paragraphs",
+        "first paragraph",
+        "first paragraphs",
         "page paragraphs",
         "website paragraphs",
         "text",
@@ -72,14 +67,7 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "pictures",
         "photos",
     ),
-
-    # -----------------------------------------------------------------------
-    # Geographic fields
-    # -----------------------------------------------------------------------
-    "latitude": (
-        "latitude",
-        "lat",
-    ),
+    "latitude": ("latitude", "lat"),
     "longitude": (
         "longitude",
         "longitude coordinate",
@@ -96,10 +84,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "gps coordinates",
         "gps location",
     ),
-
-    # -----------------------------------------------------------------------
-    # Common structured fields
-    # -----------------------------------------------------------------------
     "company": (
         "company",
         "company name",
@@ -156,13 +140,8 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "published date",
         "date posted",
     ),
-    "date": (
-        "date",
-    ),
+    "date": ("date",),
 
-    # -----------------------------------------------------------------------
-    # Facility / organization information
-    # -----------------------------------------------------------------------
     "facility": (
         "facility",
         "facility name",
@@ -203,9 +182,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "plant owner",
     ),
 
-    # -----------------------------------------------------------------------
-    # Methane / CH4
-    # -----------------------------------------------------------------------
     "methane": (
         "methane",
         "methane concentration",
@@ -246,9 +222,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "ch4 gas flow",
     ),
 
-    # -----------------------------------------------------------------------
-    # Greenhouse gases
-    # -----------------------------------------------------------------------
     "ghg": (
         "ghg",
         "greenhouse gas",
@@ -274,9 +247,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "n2o emissions",
     ),
 
-    # -----------------------------------------------------------------------
-    # Emissions
-    # -----------------------------------------------------------------------
     "emissions": (
         "emissions",
         "emission",
@@ -309,9 +279,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "source category",
     ),
 
-    # -----------------------------------------------------------------------
-    # Activity data
-    # -----------------------------------------------------------------------
     "activity_data": (
         "activity data",
         "activity",
@@ -360,9 +327,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "gas used",
     ),
 
-    # -----------------------------------------------------------------------
-    # Emission factors
-    # -----------------------------------------------------------------------
     "emission_factor": (
         "emission factor",
         "emission factors",
@@ -390,9 +354,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "factor source",
     ),
 
-    # -----------------------------------------------------------------------
-    # GHG inventory
-    # -----------------------------------------------------------------------
     "inventory": (
         "inventory",
         "ghg inventory",
@@ -423,9 +384,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "reporting company",
     ),
 
-    # -----------------------------------------------------------------------
-    # IPCC methodology / tiers
-    # -----------------------------------------------------------------------
     "ipcc": (
         "ipcc",
         "ipcc method",
@@ -464,9 +422,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "ipcc source subcategory",
     ),
 
-    # -----------------------------------------------------------------------
-    # GHG Protocol scopes
-    # -----------------------------------------------------------------------
     "scope_1": (
         "scope 1",
         "scope 1 emissions",
@@ -500,9 +455,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "value chain category",
     ),
 
-    # -----------------------------------------------------------------------
-    # Meteorological data
-    # -----------------------------------------------------------------------
     "meteorological_data": (
         "meteorological data",
         "meteorological information",
@@ -556,9 +508,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "meteorological date",
     ),
 
-    # -----------------------------------------------------------------------
-    # Units / measurements
-    # -----------------------------------------------------------------------
     "value": (
         "value",
         "measurement",
@@ -589,9 +538,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "observation time",
     ),
 
-    # -----------------------------------------------------------------------
-    # Monitoring / environmental data
-    # -----------------------------------------------------------------------
     "monitoring": (
         "monitoring",
         "environmental monitoring",
@@ -622,9 +568,6 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "lod",
     ),
 
-    # -----------------------------------------------------------------------
-    # Dates / periods
-    # -----------------------------------------------------------------------
     "start_date": (
         "start date",
         "period start",
@@ -638,25 +581,14 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _normalize_instruction(instruction: str) -> str:
     return re.sub(r"\s+", " ", instruction).strip()
 
 
 def _normalize_phrase(phrase: str) -> str:
     normalized = phrase.lower().strip()
-
-    normalized = re.sub(
-        r"^(the|a|an)\s+",
-        "",
-        normalized,
-    )
-
+    normalized = re.sub(r"^(the|a|an)\s+", "", normalized)
     normalized = normalized.strip(" .;:")
-
     return normalized
 
 
@@ -703,21 +635,18 @@ def _infer_data_type(canonical_name: str) -> str:
         "end_date",
     }
 
-    integer_or_year_fields = {
-        "inventory_year",
-        "ipcc_tier",
-        "ipcc_tier_1",
-        "ipcc_tier_2",
-        "ipcc_tier_3",
-    }
-
     if canonical_name in numeric_fields:
         return "number"
 
     if canonical_name in date_fields:
         return "date"
 
-    if canonical_name in integer_or_year_fields:
+    if canonical_name in {
+        "ipcc_tier",
+        "ipcc_tier_1",
+        "ipcc_tier_2",
+        "ipcc_tier_3",
+    }:
         return "number"
 
     if canonical_name == "coordinates":
@@ -729,7 +658,45 @@ def _infer_data_type(canonical_name: str) -> str:
 def _field_from_phrase(phrase: str) -> ExtractionField:
     normalized = _normalize_phrase(phrase)
 
-    # Exact alias matching first.
+    # Handle semantic aliases such as:
+    # "page heading as title"
+    # "first paragraph as description"
+    # "website title as title"
+    alias_rules = [
+        (
+            r"(?:page|website)\s+heading(?:s)?\s+as\s+title",
+            "title",
+        ),
+        (
+            r"heading(?:s)?\s+as\s+title",
+            "title",
+        ),
+        (
+            r"(?:page|website)\s+title\s+as\s+title",
+            "title",
+        ),
+        (
+            r"first\s+paragraph\s+as\s+description",
+            "description",
+        ),
+        (
+            r"paragraph\s+as\s+description",
+            "description",
+        ),
+        (
+            r"first\s+paragraph\s+as\s+description",
+            "description",
+        ),
+    ]
+
+    for pattern, canonical_name in alias_rules:
+        if re.fullmatch(pattern, normalized):
+            return ExtractionField(
+                name=canonical_name,
+                description=phrase.strip(),
+                data_type=_infer_data_type(canonical_name),
+            )
+
     for canonical_name, aliases in _FIELD_ALIASES.items():
         if normalized in aliases:
             return ExtractionField(
@@ -737,16 +704,6 @@ def _field_from_phrase(phrase: str) -> ExtractionField:
                 description=phrase.strip(),
                 data_type=_infer_data_type(canonical_name),
             )
-
-    # -----------------------------------------------------------------------
-    # Intelligent phrase matching.
-    #
-    # This handles instructions such as:
-    # "methane concentration in ppm"
-    # "total scope 1 emissions"
-    # "facility name"
-    # "IPCC Tier 2 emission factor"
-    # -----------------------------------------------------------------------
 
     pattern_rules: list[tuple[str, tuple[str, ...]]] = [
         (
@@ -873,10 +830,6 @@ def _field_from_phrase(phrase: str) -> ExtractionField:
                 data_type=_infer_data_type(canonical_name),
             )
 
-    # -----------------------------------------------------------------------
-    # Support custom fields.
-    # -----------------------------------------------------------------------
-
     safe_name = re.sub(
         r"[^a-z0-9]+",
         "_",
@@ -890,43 +843,44 @@ def _field_from_phrase(phrase: str) -> ExtractionField:
     )
 
 
-# ---------------------------------------------------------------------------
-# Public planner
-# ---------------------------------------------------------------------------
+def _split_instruction_fields(cleaned: str) -> list[str]:
+    """
+    Split extraction instructions while preserving semantic phrases.
+
+    Example:
+        page heading as title and first paragraph as description
+
+    becomes:
+        page heading as title
+        first paragraph as description
+    """
+
+    # Split "and" when it introduces another extraction expression.
+    parts = re.split(
+        r"\s+(?:and|&)\s+",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    phrases: list[str] = []
+
+    for part in parts:
+        # Commas and semicolons remain valid separators.
+        for phrase in re.split(r",|;", part):
+            phrase = phrase.strip(" .;:")
+            if phrase:
+                phrases.append(phrase)
+
+    return phrases
+
 
 def build_extraction_plan(instruction: str) -> ExtractionPlan:
-    """
-    Convert a natural-language extraction instruction into
-    a deterministic extraction plan.
-
-    Examples:
-
-        Extract the page title and headings
-
-        Extract company, location and salary
-
-        Extract latitude, longitude and address
-
-        Extract methane concentration, facility and temperature
-
-        Extract activity data, emission factor and inventory data
-
-        Extract IPCC Tier 2, Scope 1, Scope 2 and Scope 3 emissions
-
-    The planner intentionally avoids an external LLM dependency
-    for this implementation.
-    """
-
     normalized = _normalize_instruction(instruction)
 
     if not normalized:
         raise ValueError(
             "Extraction instruction cannot be empty."
         )
-
-    # ---------------------------------------------------------------
-    # Remove common introductory phrases.
-    # ---------------------------------------------------------------
 
     cleaned = re.sub(
         r"^(please\s+)?"
@@ -935,14 +889,6 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
         normalized,
         flags=re.IGNORECASE,
     )
-
-    # ---------------------------------------------------------------
-    # Remove phrases such as:
-    #
-    # "the following information:"
-    # "the following data:"
-    # "these fields:"
-    # ---------------------------------------------------------------
 
     cleaned = re.sub(
         r"^(the\s+)?"
@@ -954,33 +900,7 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
         flags=re.IGNORECASE,
     )
 
-    # ---------------------------------------------------------------
-    # Normalize common conjunctions.
-    # ---------------------------------------------------------------
-
-    cleaned = re.sub(
-        r"\s+and\s+",
-        ",",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-
-    # Also allow "&".
-    cleaned = re.sub(
-        r"\s*&\s*",
-        ",",
-        cleaned,
-    )
-
-    # ---------------------------------------------------------------
-    # Split requested fields.
-    # ---------------------------------------------------------------
-
-    phrases = [
-        phrase.strip(" .;:")
-        for phrase in re.split(r",|;", cleaned)
-        if phrase.strip(" .;:")
-    ]
+    phrases = _split_instruction_fields(cleaned)
 
     fields: list[ExtractionField] = []
     seen: set[str] = set()
@@ -991,7 +911,6 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
         if not field.name:
             continue
 
-        # Prevent duplicate fields.
         if field.name in seen:
             continue
 
@@ -1007,3 +926,5 @@ def build_extraction_plan(instruction: str) -> ExtractionPlan:
         instruction=normalized,
         fields=fields,
     )
+
+

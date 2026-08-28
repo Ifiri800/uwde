@@ -1289,13 +1289,11 @@ def _is_page_level_plan(
     Determine whether an extraction plan should operate on the
     entire page rather than repeated record elements.
 
-    Important:
-    ``title`` is a standard record field in UWDE job/listing
-    extraction, so it must NOT automatically make a plan
-    page-level.
+    Supports both canonical page-level fields and semantic
+    instructions such as:
 
-    A plan containing only genuine page-level fields is treated
-    as page-level extraction.
+        page heading as title
+        first paragraph as description
     """
 
     page_fields = {
@@ -1313,14 +1311,149 @@ def _is_page_level_plan(
         for field in plan.fields
     }
 
-    return bool(
-        field_names
-        and field_names.issubset(page_fields)
+    # Canonical page-level extraction.
+    if field_names and field_names.issubset(page_fields):
+        return True
+
+    # Semantic page-level extraction.
+    semantic_text = " ".join(
+        field.description.lower()
+        for field in plan.fields
     )
 
-# ---------------------------------------------------------------------------
-# Main extraction
-# ---------------------------------------------------------------------------
+    semantic_markers = (
+        "page heading",
+        "page title",
+        "first paragraph",
+        "second paragraph",
+        "third paragraph",
+        "page paragraph",
+        "page text",
+        "website heading",
+        "website title",
+    )
+
+    return any(
+        marker in semantic_text
+        for marker in semantic_markers
+    )
+
+def _extract_semantic_page_field(
+    soup: BeautifulSoup,
+    field: ExtractionField,
+    base_url: str = "",
+) -> str:
+    """
+    Extract a field according to the semantic wording of the
+    extraction instruction.
+
+    Examples:
+
+        "page heading as title"
+            -> first visible heading
+
+        "first paragraph as description"
+            -> first paragraph
+    """
+
+    description = field.description.lower().strip()
+
+    # ---------------------------------------------------------------
+    # Page heading
+    # ---------------------------------------------------------------
+
+    if (
+        "page heading" in description
+        or "website heading" in description
+        or "heading as" in description
+    ):
+        for selector in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            match = soup.select_one(selector)
+
+            if match:
+                value = _clean_text(
+                    match.get_text(
+                        " ",
+                        strip=True,
+                    )
+                )
+
+                if value:
+                    return value
+
+    # ---------------------------------------------------------------
+    # First paragraph
+    # ---------------------------------------------------------------
+
+    if "first paragraph" in description:
+        paragraphs = soup.select("p")
+
+        if paragraphs:
+            value = _clean_text(
+                paragraphs[0].get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if value:
+                return value
+
+    # ---------------------------------------------------------------
+    # Second paragraph
+    # ---------------------------------------------------------------
+
+    if "second paragraph" in description:
+        paragraphs = soup.select("p")
+
+        if len(paragraphs) >= 2:
+            value = _clean_text(
+                paragraphs[1].get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if value:
+                return value
+
+    # ---------------------------------------------------------------
+    # Third paragraph
+    # ---------------------------------------------------------------
+
+    if "third paragraph" in description:
+        paragraphs = soup.select("p")
+
+        if len(paragraphs) >= 3:
+            value = _clean_text(
+                paragraphs[2].get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if value:
+                return value
+
+    # ---------------------------------------------------------------
+    # Page title
+    # ---------------------------------------------------------------
+
+    if (
+        "page title" in description
+        and soup.title
+    ):
+        value = _clean_text(
+            soup.title.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        if value:
+            return value
+
+    return ""
 
 def execute_extraction(
     html: str,
@@ -1373,7 +1506,16 @@ def execute_extraction(
         for field in plan.fields:
             value = ""
 
-            if field.name in {
+            # First honor semantic wording such as:
+            # "page heading as title"
+            # "first paragraph as description"
+            value = _extract_semantic_page_field(
+                soup,
+                field,
+                base_url,
+            )
+
+            if not value and field.name in {
                 "title",
                 "headings",
                 "paragraphs",
@@ -1386,7 +1528,7 @@ def execute_extraction(
                     base_url,
                 )
 
-            elif field.name == "latitude":
+            elif not value and field.name == "latitude":
                 value = latitude
 
             elif field.name == "longitude":
@@ -1488,3 +1630,5 @@ def execute_extraction(
     return ExtractionResult(
         records=records
     )
+
+
