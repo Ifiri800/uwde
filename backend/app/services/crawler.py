@@ -1,8 +1,9 @@
 ﻿from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -10,6 +11,7 @@ from app.services.extraction_engine import ExtractionPlan
 from app.services.pagination import (
     PaginationConfig,
     PaginationStrategy,
+    build_next_url,
 )
 
 
@@ -29,14 +31,16 @@ class CrawlResult:
         }
 
 
-def _get_records(extraction_result: Any) -> list[dict[str, Any]]:
+def _get_records(
+    extraction_result: Any,
+) -> list[dict[str, Any]]:
     """
-    Convert an extraction result into a list of dictionaries.
+    Normalize supported extraction result shapes.
 
-    Supports:
-    - ExtractionResult
+    Supported:
+    - ExtractionResult-like objects
     - dictionaries containing "records"
-    - direct lists
+    - direct lists of dictionaries
     """
 
     if extraction_result is None:
@@ -58,7 +62,10 @@ def _get_records(extraction_result: Any) -> list[dict[str, Any]]:
 
         return []
 
-    if isinstance(extraction_result, dict):
+    if isinstance(
+        extraction_result,
+        dict,
+    ):
         records = extraction_result.get(
             "records",
             [],
@@ -73,7 +80,10 @@ def _get_records(extraction_result: Any) -> list[dict[str, Any]]:
 
         return []
 
-    if isinstance(extraction_result, list):
+    if isinstance(
+        extraction_result,
+        list,
+    ):
         return [
             record
             for record in extraction_result
@@ -88,7 +98,7 @@ def _find_next_url(
     current_url: str,
 ) -> str | None:
     """
-    Find the next page URL.
+    Discover a next-page URL from HTML.
     """
 
     if not html:
@@ -99,7 +109,7 @@ def _find_next_url(
         "html.parser",
     )
 
-    # rel="next"
+    # Explicit rel="next".
     for link in soup.find_all(
         "a",
         href=True,
@@ -122,7 +132,7 @@ def _find_next_url(
                 str(link.get("href")),
             )
 
-    # Common selectors
+    # Common next-page selectors.
     selectors = [
         "a.next",
         "a.next-page",
@@ -135,7 +145,9 @@ def _find_next_url(
     ]
 
     for selector in selectors:
-        link = soup.select_one(selector)
+        link = soup.select_one(
+            selector
+        )
 
         if link is None:
             continue
@@ -148,15 +160,13 @@ def _find_next_url(
                 str(href),
             )
 
-    # Common next-page text
+    # Common next-page link text.
     next_texts = {
         "next",
         "next page",
         "older",
         "older posts",
         "›",
-        "next",
-        "?",
     }
 
     for link in soup.find_all(
@@ -177,15 +187,11 @@ def _find_next_url(
     return None
 
 
-def _is_retryable_fetch_error(exc: Exception) -> bool:
+def _is_retryable_fetch_error(
+    exc: Exception,
+) -> bool:
     """
-    Determine whether a fetch exception is transient.
-
-    Retryable:
-    - TimeoutError
-    - ConnectionError
-
-    Permanent/unclassified errors are not retried.
+    Determine whether a fetch failure is transient.
     """
 
     return isinstance(
@@ -203,13 +209,13 @@ def _fetch_with_retry(
     max_retries: int = 2,
 ) -> tuple[bool, Any, Exception | None]:
     """
-    Fetch a URL with bounded retries.
+    Execute bounded fetch retries.
 
-    max_retries means retries AFTER the initial request.
+    max_retries represents retries after the initial attempt.
 
-    Therefore:
+    Example:
         max_retries=2
-        -> maximum 3 total attempts
+        -> maximum 3 total attempts.
     """
 
     attempts = 0
@@ -218,14 +224,189 @@ def _fetch_with_retry(
         attempts += 1
 
         try:
-            return True, fetch_fn(url), None
+            return (
+                True,
+                fetch_fn(url),
+                None,
+            )
 
         except Exception as exc:
-            if not _is_retryable_fetch_error(exc):
-                return False, None, exc
+            if not _is_retryable_fetch_error(
+                exc
+            ):
+                return (
+                    False,
+                    None,
+                    exc,
+                )
 
             if attempts > max_retries:
-                return False, None, exc
+                return (
+                    False,
+                    None,
+                    exc,
+                )
+
+
+def _get_current_page_number(
+    current_url: str,
+    config: PaginationConfig,
+) -> int:
+    """
+    Determine the current page number.
+
+    Missing or invalid values default to page 1.
+    """
+
+    parts = urlsplit(
+        current_url
+    )
+
+    query = parse_qs(
+        parts.query,
+        keep_blank_values=True,
+    )
+
+    values = query.get(
+        config.parameter
+    )
+
+    if not values:
+        return 1
+
+    try:
+        page_number = int(
+            values[0]
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return 1
+
+    return max(
+        page_number,
+        1,
+    )
+
+
+def _get_next_url(
+    html: str,
+    current_url: str,
+    config: PaginationConfig,
+    current_page_number: int,
+) -> tuple[str | None, str]:
+    """
+    Resolve the next page according to the configured strategy.
+
+    Returns:
+        (next_url, stop_reason)
+    """
+
+    strategy = config.strategy
+
+    if strategy == PaginationStrategy.NONE:
+        return (
+            None,
+            "no_pagination",
+        )
+
+    if strategy == PaginationStrategy.NEXT_LINK:
+        next_url = _find_next_url(
+            html,
+            current_url,
+        )
+
+        if not next_url:
+            return (
+                None,
+                "no_next_page",
+            )
+
+        return (
+            next_url,
+            "",
+        )
+
+    if strategy == PaginationStrategy.URL:
+        next_page_number = (
+            current_page_number + 1
+        )
+
+        next_url = build_next_url(
+            current_url,
+            config,
+            next_page_number,
+        )
+
+        if next_url == current_url:
+            return (
+                None,
+                "duplicate_url",
+            )
+
+        return (
+            next_url,
+            "",
+        )
+
+    if strategy == PaginationStrategy.LOAD_MORE:
+        return (
+            None,
+            "browser_required",
+        )
+
+    if strategy == PaginationStrategy.INFINITE_SCROLL:
+        return (
+            None,
+            "browser_required",
+        )
+
+    return (
+        None,
+        "unsupported_pagination_strategy",
+    )
+
+
+def _normalize_html(
+    value: Any,
+) -> str | None:
+    """
+    Normalize supported fetch response shapes to HTML text.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        str,
+    ):
+        return value
+
+    if hasattr(
+        value,
+        "html",
+    ):
+        html = value.html
+
+        if html is None:
+            return None
+
+        return str(html)
+
+    if hasattr(
+        value,
+        "text",
+    ):
+        text = value.text
+
+        if text is None:
+            return None
+
+        return str(text)
+
+    return str(value)
 
 
 def crawl(
@@ -238,18 +419,22 @@ def crawl(
     max_retries: int = 2,
 ) -> CrawlResult:
     """
-    Crawl pages and extract records.
+    Crawl paginated pages and extract structured records.
 
     Reliability guarantees:
-    - transient fetch errors are retried
-    - permanent fetch errors are not retried
-    - retry exhaustion does not crash the crawl
-    - extraction errors are isolated
-    - page and record limits are preserved
+    - bounded transient fetch retries
+    - permanent fetch failures are not retried
+    - retry exhaustion stops safely
+    - extraction failures do not escape the crawler
+    - duplicate URLs are prevented
+    - page limits are enforced
+    - record limits are enforced
+    - rate limiting is applied between page requests
+    - all results remain serializable
     """
 
     # ---------------------------------------------------------------
-    # Validate URL
+    # Input validation
     # ---------------------------------------------------------------
 
     if not start_url:
@@ -257,18 +442,10 @@ def crawl(
             "start_url must not be empty"
         )
 
-    # ---------------------------------------------------------------
-    # Validate retry configuration
-    # ---------------------------------------------------------------
-
     if max_retries < 0:
         raise ValueError(
             "max_retries must not be negative"
         )
-
-    # ---------------------------------------------------------------
-    # Validate rate limit
-    # ---------------------------------------------------------------
 
     if rate_limit_seconds is not None:
         if rate_limit_seconds < 0:
@@ -277,7 +454,7 @@ def crawl(
             )
 
     # ---------------------------------------------------------------
-    # Default configuration
+    # Pagination configuration
     # ---------------------------------------------------------------
 
     if config is None:
@@ -313,7 +490,10 @@ def crawl(
             "max_records must be greater than zero"
         )
 
-    # If no explicit rate limit was supplied, use the config value.
+    # ---------------------------------------------------------------
+    # Rate-limit configuration
+    # ---------------------------------------------------------------
+
     if rate_limit_seconds is None:
         rate_limit_seconds = getattr(
             config,
@@ -341,16 +521,21 @@ def crawl(
 
     current_url = start_url
 
+    current_page_number = _get_current_page_number(
+        current_url,
+        config,
+    )
+
     stopped_reason = ""
 
     # ---------------------------------------------------------------
-    # Main loop
+    # Main crawl loop
     # ---------------------------------------------------------------
 
     while current_url:
 
         # -----------------------------------------------------------
-        # Duplicate URL protection
+        # Duplicate protection
         # -----------------------------------------------------------
 
         if current_url in visited_urls:
@@ -358,7 +543,7 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Maximum page protection
+        # Page limit
         # -----------------------------------------------------------
 
         if len(urls_crawled) >= max_pages:
@@ -366,7 +551,7 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Maximum record protection
+        # Record limit
         # -----------------------------------------------------------
 
         if len(records) >= max_records:
@@ -374,19 +559,40 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Register page BEFORE fetching.
+        # Rate limiting
         #
-        # This preserves crawler state even when fetch fails.
+        # Do not delay the first request.
+        # Delay only between pages.
         # -----------------------------------------------------------
 
-        visited_urls.add(current_url)
-        urls_crawled.append(current_url)
+        if urls_crawled and rate_limit_seconds > 0:
+            time.sleep(
+                rate_limit_seconds
+            )
 
         # -----------------------------------------------------------
-        # Fetch with bounded retry policy
+        # Register URL before fetching.
+        #
+        # This preserves crawl state even when fetching fails.
         # -----------------------------------------------------------
 
-        fetch_success, html, fetch_error = _fetch_with_retry(
+        visited_urls.add(
+            current_url
+        )
+
+        urls_crawled.append(
+            current_url
+        )
+
+        # -----------------------------------------------------------
+        # Fetch with bounded retries
+        # -----------------------------------------------------------
+
+        (
+            fetch_success,
+            fetched,
+            fetch_error,
+        ) = _fetch_with_retry(
             fetch_fn,
             current_url,
             max_retries=max_retries,
@@ -396,37 +602,16 @@ def crawl(
             stopped_reason = "fetch_error"
             break
 
+        html = _normalize_html(
+            fetched
+        )
+
         if html is None:
             stopped_reason = "fetch_error"
             break
 
         # -----------------------------------------------------------
-        # Normalize fetch result.
-        # -----------------------------------------------------------
-
-        if not isinstance(
-            html,
-            str,
-        ):
-            if hasattr(
-                html,
-                "html",
-            ):
-                html = html.html
-
-            elif hasattr(
-                html,
-                "text",
-            ):
-                html = html.text
-
-            else:
-                html = str(html)
-
-        # -----------------------------------------------------------
-        # Execute extraction.
-        #
-        # Extraction failures must not escape the crawler.
+        # Extraction
         # -----------------------------------------------------------
 
         try:
@@ -445,9 +630,7 @@ def crawl(
         )
 
         # -----------------------------------------------------------
-        # Add extracted records.
-        #
-        # Respect max_records exactly.
+        # Respect record limit exactly
         # -----------------------------------------------------------
 
         remaining_records = (
@@ -463,7 +646,7 @@ def crawl(
             )
 
         # -----------------------------------------------------------
-        # Stop when record limit is reached.
+        # Record limit reached
         # -----------------------------------------------------------
 
         if len(records) >= max_records:
@@ -471,7 +654,7 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Stop when maximum page count has been reached.
+        # Page limit reached
         # -----------------------------------------------------------
 
         if len(urls_crawled) >= max_pages:
@@ -479,33 +662,31 @@ def crawl(
             break
 
         # -----------------------------------------------------------
-        # Pagination strategy.
+        # Resolve pagination
         # -----------------------------------------------------------
 
-        strategy = getattr(
-            config,
-            "strategy",
-            PaginationStrategy.NEXT_LINK,
-        )
-
-        if strategy != PaginationStrategy.NEXT_LINK:
-            pass
-
-        next_url = _find_next_url(
+        (
+            next_url,
+            pagination_stop_reason,
+        ) = _get_next_url(
             html,
             current_url,
+            config,
+            current_page_number,
         )
 
-        # -----------------------------------------------------------
-        # No next page
-        # -----------------------------------------------------------
+        if pagination_stop_reason:
+            stopped_reason = (
+                pagination_stop_reason
+            )
+            break
 
         if not next_url:
             stopped_reason = "no_next_page"
             break
 
         # -----------------------------------------------------------
-        # Duplicate next page
+        # Duplicate next URL protection
         # -----------------------------------------------------------
 
         if next_url in visited_urls:
@@ -514,9 +695,14 @@ def crawl(
 
         current_url = next_url
 
+        if config.strategy == PaginationStrategy.URL:
+            current_page_number += 1
+
     return CrawlResult(
         records=records,
-        pages_crawled=len(urls_crawled),
+        pages_crawled=len(
+            urls_crawled
+        ),
         urls_crawled=urls_crawled,
         stopped_reason=stopped_reason,
     )
@@ -526,5 +712,3 @@ __all__ = [
     "CrawlResult",
     "crawl",
 ]
-
-
