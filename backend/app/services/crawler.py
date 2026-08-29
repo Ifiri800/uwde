@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
@@ -409,6 +409,225 @@ def _normalize_html(
     return str(value)
 
 
+def _crawl_dynamic(
+    start_url: str,
+    plan: ExtractionPlan,
+    fetch_fn: Callable[..., Any],
+    execute_fn: Callable[..., Any],
+    config: PaginationConfig,
+    browser: Any,
+    records: list[dict[str, Any]],
+    rate_limit_seconds: float,
+) -> CrawlResult:
+    """
+    Execute browser-based dynamic pagination.
+
+    Dynamic pagination is content-state based rather than URL based.
+    LOAD_MORE and INFINITE_SCROLL commonly keep the same URL while
+    changing the rendered document.
+    """
+
+    urls_crawled: list[str] = [start_url]
+
+    # ---------------------------------------------------------------
+    # Initial page
+    # ---------------------------------------------------------------
+
+    try:
+        initial = fetch_fn(start_url)
+        initial_html = _normalize_html(initial)
+
+        if initial_html is None:
+            return CrawlResult(
+                records=records,
+                pages_crawled=1,
+                urls_crawled=urls_crawled,
+                stopped_reason="fetch_error",
+            )
+
+        extraction_result = execute_fn(
+            initial_html,
+            plan,
+            start_url,
+        )
+
+        page_records = _get_records(
+            extraction_result,
+        )
+
+        remaining = config.max_records - len(records)
+
+        if remaining > 0:
+            records.extend(
+                page_records[:remaining]
+            )
+
+    except Exception:
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="extraction_error",
+        )
+
+    if len(records) >= config.max_records:
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="max_records",
+        )
+
+    # ---------------------------------------------------------------
+    # Page limit
+    # ---------------------------------------------------------------
+
+    if config.max_pages <= 1:
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="max_pages",
+        )
+
+    # ---------------------------------------------------------------
+    # Select browser pagination operation
+    # ---------------------------------------------------------------
+
+    if config.strategy == PaginationStrategy.LOAD_MORE:
+        browser_method = getattr(
+            browser,
+            "load_more",
+            None,
+        )
+
+    elif config.strategy == PaginationStrategy.INFINITE_SCROLL:
+        browser_method = getattr(
+            browser,
+            "infinite_scroll",
+            None,
+        )
+
+    else:
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="unsupported_pagination_strategy",
+        )
+
+    if not callable(browser_method):
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="browser_error",
+        )
+
+    # ---------------------------------------------------------------
+    # Browser pagination
+    # ---------------------------------------------------------------
+
+    if rate_limit_seconds > 0:
+        time.sleep(rate_limit_seconds)
+
+    try:
+        result = browser_method(start_url)
+    except Exception:
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="browser_error",
+        )
+
+    # ---------------------------------------------------------------
+    # Normalize browser response
+    # ---------------------------------------------------------------
+
+    if isinstance(result, dict):
+        next_url = str(
+            result.get("url")
+            or start_url
+        )
+        next_html = result.get("html")
+
+    else:
+        next_url = str(
+            getattr(
+                result,
+                "url",
+                start_url,
+            )
+        )
+        next_html = getattr(
+            result,
+            "html",
+            None,
+        )
+
+    if next_html is None:
+        next_html = _normalize_html(result)
+
+    if next_html is None:
+        return CrawlResult(
+            records=records,
+            pages_crawled=1,
+            urls_crawled=urls_crawled,
+            stopped_reason="no_next_page",
+        )
+
+    # ---------------------------------------------------------------
+    # Dynamic pages may intentionally retain the same URL.
+    # Therefore do NOT reject next_url == start_url.
+    # ---------------------------------------------------------------
+
+    urls_crawled.append(next_url)
+
+    try:
+        extraction_result = execute_fn(
+            str(next_html),
+            plan,
+            next_url,
+        )
+
+        page_records = _get_records(
+            extraction_result,
+        )
+
+        remaining = config.max_records - len(records)
+
+        if remaining > 0:
+            records.extend(
+                page_records[:remaining]
+            )
+
+    except Exception:
+        return CrawlResult(
+            records=records,
+            pages_crawled=len(urls_crawled),
+            urls_crawled=urls_crawled,
+            stopped_reason="extraction_error",
+        )
+
+    # ---------------------------------------------------------------
+    # Final stop state
+    # ---------------------------------------------------------------
+
+    if len(records) >= config.max_records:
+        stopped_reason = "max_records"
+    elif len(urls_crawled) >= config.max_pages:
+        stopped_reason = "no_next_page"
+    else:
+        stopped_reason = "no_next_page"
+
+    return CrawlResult(
+        records=records,
+        pages_crawled=len(urls_crawled),
+        urls_crawled=urls_crawled,
+        stopped_reason=stopped_reason,
+    )
+
 def crawl(
     start_url: str,
     plan: ExtractionPlan,
@@ -417,6 +636,7 @@ def crawl(
     config: PaginationConfig | None = None,
     rate_limit_seconds: float | None = None,
     max_retries: int = 2,
+    browser: Any | None = None,
 ) -> CrawlResult:
     """
     Crawl paginated pages and extract structured records.
@@ -510,6 +730,32 @@ def crawl(
         )
 
     # ---------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # Browser pagination dispatch
+    # ---------------------------------------------------------------
+
+    if config.strategy in {
+        PaginationStrategy.LOAD_MORE,
+        PaginationStrategy.INFINITE_SCROLL,
+    }:
+        if browser is None:
+            return CrawlResult(
+                records=[],
+                pages_crawled=0,
+                urls_crawled=[],
+                stopped_reason="browser_required",
+            )
+
+        return _crawl_dynamic(
+                start_url=start_url,
+                plan=plan,
+                fetch_fn=fetch_fn,
+                execute_fn=execute_fn,
+            config=config,
+            browser=browser,
+            records=[],
+            rate_limit_seconds=rate_limit_seconds,
+        )
     # Crawl state
     # ---------------------------------------------------------------
 
@@ -712,3 +958,12 @@ __all__ = [
     "CrawlResult",
     "crawl",
 ]
+
+
+
+
+
+
+
+
+
