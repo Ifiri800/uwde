@@ -27,6 +27,9 @@ from backend.app.services.pipeline_reliability import (
 from backend.app.services.pipeline_failure_classifier import (
     classify_failure,
 )
+from backend.app.services.intelligence.ai.pipeline import orchestrate_pipeline_records
+from backend.app.services.intelligence.ai.orchestrator import AIOrchestrationResult
+
 from backend.app.services.pipeline_validator import (
     PipelineValidationResult,
     validate_pipeline_input,
@@ -42,19 +45,19 @@ class PipelineResult:
     Pipeline:
 
         URL
-          ↓
+          ?
         Input validation
-          ↓
+          ?
         Extraction plan
-          ↓
+          ?
         HTTP fetch
-          ↓
+          ?
         HTML decoding
-          ↓
+          ?
         Structured extraction
-          ↓
+          ?
         Output validation
-          ↓
+          ?
         Validated pipeline result
     """
 
@@ -74,6 +77,7 @@ class PipelineResult:
     validation: PipelineValidationResult | None = None
     observability: PipelineExecutionMetadata | None = None
     reliability: PipelineReliabilityMetadata | None = None
+    ai: AIOrchestrationResult | None = None
 
     @property
     def record_count(self) -> int:
@@ -98,6 +102,12 @@ class PipelineResult:
             else None
         )
 
+        ai_data = (
+            self.ai.to_dict()
+            if self.ai
+            else None
+        )
+
         return {
             "status": self.status,
             "url": self.url,
@@ -116,6 +126,7 @@ class PipelineResult:
             "validation": validation_data,
             "observability": observability_data,
             "reliability": reliability_data,
+            "ai": ai_data,
         }
 
 
@@ -426,7 +437,30 @@ def run_extraction_pipeline(
         raise
 
     # ---------------------------------------------------------------
-    # 7. Complete pipeline
+    # 7. AI intelligence
+    # ---------------------------------------------------------------
+
+    ai_result = None
+
+    if validation.valid:
+        tracker.start_stage("ai_intelligence")
+
+        try:
+            ai_result = orchestrate_pipeline_records(
+                records,
+                instruction=normalized_instruction,
+            )
+
+            tracker.complete_stage("ai_intelligence")
+
+        except Exception as exc:
+            tracker.fail(
+                "ai_intelligence",
+                exc,
+            )
+            raise
+    # ---------------------------------------------------------------
+    # 8. Complete pipeline
     # ---------------------------------------------------------------
 
     tracker.start_stage("completed")
@@ -460,4 +494,10 @@ def run_extraction_pipeline(
         validation=validation,
         observability=observability,
         reliability=reliability,
+        ai=ai_result,
     )
+
+
+
+
+

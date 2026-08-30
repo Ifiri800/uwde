@@ -232,6 +232,7 @@ def test_pipeline_records_observability_metadata(
         "decoding",
         "extraction",
         "quality_validation",
+        "ai_intelligence",
         "completed",
     ]
 
@@ -286,3 +287,43 @@ def test_pipeline_observability_records_stage_timings(
         assert stage.completed_at
         assert stage.duration_ms is not None
         assert stage.duration_ms >= 0
+def test_pipeline_result_serializes_ai_output(
+    monkeypatch,
+):
+    class FakeResponse:
+        url = "https://example.com"
+        final_url = "https://example.com/jobs"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <body>
+                <article class="job">
+                    <h2 class="title">Environmental Consultant</h2>
+                </article>
+            </body>
+        </html>
+        """
+
+    monkeypatch.setattr(
+        "backend.app.services.pipeline_orchestrator.fetch_url",
+        lambda url: FakeResponse(),
+    )
+
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title",
+    )
+
+    data = result.to_dict()
+
+    assert "ai" in data
+    assert data["ai"] is not None
+    assert "context" in data["ai"]
+    assert "reasoning" in data["ai"]
+    assert "synthesis" in data["ai"]
+    assert "recommendation" in data["ai"]
+
+    serialized = json.dumps(data)
+
+    assert serialized
