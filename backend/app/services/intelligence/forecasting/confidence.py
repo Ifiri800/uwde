@@ -32,9 +32,9 @@ class ForecastConfidenceAnalysis:
     historical_consistency: float
     data_coverage: float
     uncertainty: float
-    observation_count: int
     evidence_ids: tuple[str, ...]
     explanation: str
+    observation_count: int = 1
 
     def __post_init__(self) -> None:
         if not self.entity_id.strip():

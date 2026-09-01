@@ -138,3 +138,128 @@ class BrowserAutomation:
         )
 
         return page
+
+    def load_more(
+        self,
+        url: str,
+        selector: str = "button#load-more, a#load-more, .load-more, [data-load-more]",
+    ) -> BrowserPage:
+        """
+        Open a page, click a Load More control, and return the
+        resulting rendered page.
+        """
+
+        if not url or not url.strip():
+            raise ValueError("URL cannot be empty.")
+
+        context = self.create_context()
+
+        try:
+            page = context.new_page()
+
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=self.timeout_ms,
+            )
+
+            control = page.locator(selector).first
+
+            if control.count() == 0:
+                raise RuntimeError(
+                    "Load More control was not found."
+                )
+
+            before_html = page.content()
+
+            control.click(
+                timeout=self.timeout_ms,
+            )
+
+            page.wait_for_function(
+                """
+                (previousHtml) => document.documentElement.outerHTML !== previousHtml
+                """,
+                before_html,
+                timeout=self.timeout_ms,
+            )
+
+            return BrowserPage(
+                url=page.url,
+                title=page.title(),
+                html=page.content(),
+                text=page.locator("body").inner_text(),
+            )
+
+        finally:
+            context.close()
+
+    def infinite_scroll(
+        self,
+        url: str,
+        scroll_count: int = 1,
+        scroll_distance: int = 1200,
+    ) -> BrowserPage:
+        """
+        Open a page, perform bounded scrolling, and return the
+        resulting rendered page.
+        """
+
+        if not url or not url.strip():
+            raise ValueError("URL cannot be empty.")
+
+        if scroll_count <= 0:
+            raise ValueError(
+                "scroll_count must be greater than zero."
+            )
+
+        if scroll_distance <= 0:
+            raise ValueError(
+                "scroll_distance must be greater than zero."
+            )
+
+        context = self.create_context()
+
+        try:
+            page = context.new_page()
+
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=self.timeout_ms,
+            )
+
+            for _ in range(scroll_count):
+                before_height = page.evaluate(
+                    "document.body.scrollHeight"
+                )
+
+                page.evaluate(
+                    "(distance) => window.scrollBy(0, distance)",
+                    scroll_distance,
+                )
+
+                try:
+                    page.wait_for_function(
+                        """
+                        (previousHeight) =>
+                            document.body.scrollHeight > previousHeight
+                        """,
+                        before_height,
+                        timeout=min(
+                            self.timeout_ms,
+                            5_000,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            return BrowserPage(
+                url=page.url,
+                title=page.title(),
+                html=page.content(),
+                text=page.locator("body").inner_text(),
+            )
+
+        finally:
+            context.close()

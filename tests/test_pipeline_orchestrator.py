@@ -327,3 +327,73 @@ def test_pipeline_result_serializes_ai_output(
     serialized = json.dumps(data)
 
     assert serialized
+
+def test_pipeline_runs_complete_ai_intelligence_flow(
+    monkeypatch,
+):
+    class FakeResponse:
+        url = "https://example.com"
+        final_url = "https://example.com/jobs"
+        status_code = 200
+        content_type = "text/html"
+        body = b"""
+        <html>
+            <body>
+                <article class="job">
+                    <h2 class="title">Environmental Consultant</h2>
+                    <p class="location">Kano, Nigeria</p>
+                </article>
+                <article class="job">
+                    <h2 class="title">WASH Specialist</h2>
+                    <p class="location">Abuja, Nigeria</p>
+                </article>
+            </body>
+        </html>
+        """
+
+    monkeypatch.setattr(
+        "backend.app.services.pipeline_orchestrator.fetch_url",
+        lambda url: FakeResponse(),
+    )
+
+    result = run_extraction_pipeline(
+        "https://example.com",
+        "Extract the job title and location",
+    )
+
+    assert result.status == "success"
+    assert result.record_count == 2
+
+    assert result.ai is not None
+
+    assert result.ai.context.observation_count == 2
+
+    assert result.ai.reasoning is not None
+    assert result.ai.reasoning.conclusion
+
+    assert result.ai.synthesis is not None
+    assert result.ai.synthesis.summary
+
+    assert result.ai.recommendation is not None
+    assert result.ai.recommendation.recommendation
+
+    assert result.ai.evaluation is not None
+    assert result.ai.evaluation.guardrails.passed
+
+    assert result.observability is not None
+
+    stage_names = [
+        stage.name
+        for stage in result.observability.stages
+    ]
+
+    assert stage_names == [
+        "validation",
+        "planning",
+        "fetching",
+        "decoding",
+        "extraction",
+        "quality_validation",
+        "ai_intelligence",
+        "completed",
+    ]

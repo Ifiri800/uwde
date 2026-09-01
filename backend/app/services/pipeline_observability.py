@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +13,7 @@ PIPELINE_STAGES = (
     "decoding",
     "extraction",
     "quality_validation",
+    "ai_intelligence",
     "completed",
 )
 

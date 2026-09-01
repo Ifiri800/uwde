@@ -1,7 +1,26 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
+
+
+class EntityType(str, Enum):
+    ORGANIZATION = "organization"
+    LOCATION = "location"
+    DATE = "date"
+    PERCENTAGE = "percentage"
+    CURRENCY = "currency"
+    PERSON = "person"
+    PRODUCT = "product"
+    INDUSTRY = "industry"
+
+
+class EntitySource(str, Enum):
+    DETERMINISTIC = "deterministic"
+    NLP = "nlp"
+    LLM = "llm"
+    EXTERNAL = "external"
 
 
 @dataclass(frozen=True)
@@ -9,18 +28,16 @@ class RecognizedEntity:
     """An entity identified and normalized from source content."""
 
     text: str
-    entity_type: str
+    entity_type: EntityType
     normalized_value: str
     confidence: float = 1.0
     start: int = 0
     end: int = 0
+    source: EntitySource = EntitySource.DETERMINISTIC
 
     def __post_init__(self) -> None:
         if not self.text.strip():
             raise ValueError("text is required")
-
-        if not self.entity_type.strip():
-            raise ValueError("entity_type is required")
 
         if not self.normalized_value.strip():
             raise ValueError("normalized_value is required")
@@ -49,11 +66,32 @@ class EntityRecognitionResult:
     def has_entities(self) -> bool:
         return bool(self.entities)
 
+    def by_type(
+        self,
+        entity_type: EntityType,
+    ) -> tuple[RecognizedEntity, ...]:
+        return tuple(
+            entity
+            for entity in self.entities
+            if entity.entity_type == entity_type
+        )
 
-_PERCENTAGE_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\s*%")
+
+_PERCENTAGE_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*%"
+)
+
 _CURRENCY_PATTERN = re.compile(
-    r"(?:(?:USD|EUR|GBP|NGN)\s*)?\$?\d+(?:,\d{3})*(?:\.\d+)?"
-    r"(?:\s*(?:USD|EUR|GBP|NGN))?"
+    r"(?:"
+    r"\b(?:USD|EUR|GBP|NGN)\s*\d+(?:,\d{3})*(?:\.\d+)?"
+    r"|"
+    r"\$\s*\d+(?:,\d{3})*(?:\.\d+)?"
+    r"|"
+    r"€\s*\d+(?:,\d{3})*(?:\.\d+)?"
+    r"|"
+    r"£\s*\d+(?:,\d{3})*(?:\.\d+)?"
+    r")",
+    re.IGNORECASE,
 )
 
 _DATE_PATTERN = re.compile(
@@ -63,20 +101,25 @@ _DATE_PATTERN = re.compile(
     r"\d{1,2}/\d{1,2}/\d{2,4}"
     r"|"
     r"(?:January|February|March|April|May|June|July|August|"
-    r"September|October|November|December)\s+\d{1,2},?\s+\d{4}"
+    r"September|October|November|December)"
+    r"\s+\d{1,2},?\s+\d{4}"
     r")\b",
     re.IGNORECASE,
 )
 
 _LOCATION_PATTERN = re.compile(
-    r"\b(?:Nigeria|Ghana|Kenya|South Africa|United States|"
-    r"United Kingdom|Abuja|Lagos|London|New York)\b",
+    r"\b(?:"
+    r"Nigeria|Ghana|Kenya|South Africa|"
+    r"United States|United Kingdom|"
+    r"Abuja|Lagos|Port Harcourt|London|New York"
+    r")\b",
     re.IGNORECASE,
 )
 
 _COMPANY_PATTERN = re.compile(
     r"\b[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*)*"
-    r"\s+(?:Ltd|Limited|Inc|Incorporated|Corp|Corporation|PLC|LLC)\b"
+    r"\s+(?:Ltd|Limited|Inc|Incorporated|Corp|Corporation|"
+    r"PLC|LLC|LLP|GmbH|S\.A\.|AG)\b"
 )
 
 
@@ -86,7 +129,7 @@ def _normalize(value: str) -> str:
 
 def _entity(
     text: str,
-    entity_type: str,
+    entity_type: EntityType,
     start: int,
     end: int,
     confidence: float = 0.90,
@@ -98,13 +141,14 @@ def _entity(
         confidence=confidence,
         start=start,
         end=end,
+        source=EntitySource.DETERMINISTIC,
     )
 
 
 def _find_entities(
     pattern: re.Pattern[str],
     text: str,
-    entity_type: str,
+    entity_type: EntityType,
     confidence: float,
 ) -> list[RecognizedEntity]:
     return [
@@ -119,13 +163,62 @@ def _find_entities(
     ]
 
 
+def _overlaps(
+    left: RecognizedEntity,
+    right: RecognizedEntity,
+) -> bool:
+    return left.start < right.end and right.start < left.end
+
+
+def _priority(entity_type: EntityType) -> int:
+    priorities = {
+        EntityType.ORGANIZATION: 100,
+        EntityType.LOCATION: 90,
+        EntityType.DATE: 80,
+        EntityType.CURRENCY: 70,
+        EntityType.PERCENTAGE: 60,
+        EntityType.PERSON: 50,
+        EntityType.PRODUCT: 40,
+        EntityType.INDUSTRY: 30,
+    }
+
+    return priorities.get(entity_type, 0)
+
+
+def _resolve_overlaps(
+    entities: list[RecognizedEntity],
+) -> tuple[RecognizedEntity, ...]:
+    ranked = sorted(
+        entities,
+        key=lambda entity: (
+            -_priority(entity.entity_type),
+            -(entity.end - entity.start),
+            entity.start,
+        ),
+    )
+
+    selected: list[RecognizedEntity] = []
+
+    for entity in ranked:
+        if any(_overlaps(entity, existing) for existing in selected):
+            continue
+
+        selected.append(entity)
+
+    return tuple(
+        sorted(
+            selected,
+            key=lambda entity: (entity.start, entity.end),
+        )
+    )
+
+
 def recognize_entities(text: str) -> EntityRecognitionResult:
     """
     Recognize common business and intelligence entities.
 
-    This deterministic implementation is provider-independent. A future
-    NER model or LLM can enrich the same contract without changing
-    downstream UWDE consumers.
+    Deterministic and provider-independent. Future NLP and LLM
+    providers can produce the same entity contract.
     """
 
     if not isinstance(text, str):
@@ -140,7 +233,7 @@ def recognize_entities(text: str) -> EntityRecognitionResult:
         _find_entities(
             _COMPANY_PATTERN,
             text,
-            "organization",
+            EntityType.ORGANIZATION,
             0.90,
         )
     )
@@ -149,7 +242,7 @@ def recognize_entities(text: str) -> EntityRecognitionResult:
         _find_entities(
             _LOCATION_PATTERN,
             text,
-            "location",
+            EntityType.LOCATION,
             0.95,
         )
     )
@@ -158,7 +251,7 @@ def recognize_entities(text: str) -> EntityRecognitionResult:
         _find_entities(
             _DATE_PATTERN,
             text,
-            "date",
+            EntityType.DATE,
             0.95,
         )
     )
@@ -167,7 +260,7 @@ def recognize_entities(text: str) -> EntityRecognitionResult:
         _find_entities(
             _PERCENTAGE_PATTERN,
             text,
-            "percentage",
+            EntityType.PERCENTAGE,
             0.98,
         )
     )
@@ -176,22 +269,11 @@ def recognize_entities(text: str) -> EntityRecognitionResult:
         _find_entities(
             _CURRENCY_PATTERN,
             text,
-            "currency",
-            0.90,
+            EntityType.CURRENCY,
+            0.95,
         )
     )
 
-    # Remove exact duplicate spans while preserving detection order.
-    unique: dict[tuple[int, int, str], RecognizedEntity] = {}
-
-    for entity in entities:
-        unique[(entity.start, entity.end, entity.entity_type)] = entity
-
-    ordered = tuple(
-        sorted(
-            unique.values(),
-            key=lambda entity: (entity.start, entity.end),
-        )
+    return EntityRecognitionResult(
+        entities=_resolve_overlaps(entities)
     )
-
-    return EntityRecognitionResult(entities=ordered)
